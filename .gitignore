@@ -16,8 +16,8 @@ wheels/
 # Virtual environment
 .venv
 
-# Data (symlink to submodule)
-data
+# Data (contents come from submodule; symlink is tracked)
+data/
 
 # Output
 output/

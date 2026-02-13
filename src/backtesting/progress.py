@@ -128,6 +128,7 @@ class PinnedProgress:
     @staticmethod
     def _strip_ansi(s: str) -> str:
         import re
+
         return re.sub(r"\033\[[0-9;]*m", "", s)
 
     @staticmethod

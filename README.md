@@ -63,7 +63,7 @@ uv sync
 
 ### 3. Download the data
 
-This downloads and extracts the historical trade dataset (~2 GB compressed) into the submodule's `data/` directory. A symlink at the root points there.
+This downloads and extracts the historical trade dataset (~36 GB compressed) into the submodule's `data/` directory. A symlink at the root points there.
 
 ```bash
 make setup

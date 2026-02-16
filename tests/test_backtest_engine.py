@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from src.backtesting.rust_engine import Engine
 from src.backtesting.feeds.kalshi import KalshiFeed
 from src.backtesting.models import Side, TradeEvent
+from src.backtesting.rust_engine import Engine
 from src.backtesting.strategy import Strategy
 
 

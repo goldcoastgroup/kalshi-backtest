@@ -5,7 +5,6 @@ against historical Kalshi and Polymarket data.
 """
 
 from src.backtesting.logger import BacktestLogger
-from src.backtesting.rust_engine import Engine
 from src.backtesting.models import (
     BacktestResult,
     Fill,
@@ -19,6 +18,7 @@ from src.backtesting.models import (
     Side,
     TradeEvent,
 )
+from src.backtesting.rust_engine import Engine
 from src.backtesting.strategy import Strategy
 
 __all__ = [

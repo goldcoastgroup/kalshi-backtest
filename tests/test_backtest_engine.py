@@ -15,8 +15,8 @@ from src.backtesting.strategy import Strategy
 class AlwaysBuyLowStrategy(Strategy):
     """Test strategy that buys YES on every new market at 0.30."""
 
-    def __init__(self) -> None:
-        super().__init__(name="test_always_buy_low", description="test")
+    def __init__(self, initial_cash: float = 1000.0) -> None:
+        super().__init__(name="test_always_buy_low", description="test", initial_cash=initial_cash)
         self._seen: set[str] = set()
 
     def on_trade(self, trade: TradeEvent) -> None:
@@ -32,7 +32,6 @@ class TestEngineRun:
         engine = Engine(
             feed=feed,
             strategy=strategy,
-            initial_cash=1000.0,
             snapshot_interval=3,
             progress=False,
         )
@@ -47,7 +46,6 @@ class TestEngineRun:
         engine = Engine(
             feed=feed,
             strategy=strategy,
-            initial_cash=1000.0,
             progress=False,
         )
         result = engine.run()
@@ -59,7 +57,6 @@ class TestEngineRun:
         engine = Engine(
             feed=feed,
             strategy=strategy,
-            initial_cash=1000.0,
             progress=False,
         )
         result = engine.run()
@@ -71,7 +68,6 @@ class TestEngineRun:
         engine = Engine(
             feed=feed,
             strategy=strategy,
-            initial_cash=1000.0,
             snapshot_interval=2,
             progress=False,
         )
@@ -90,7 +86,6 @@ class TestEngineRun:
             engine = Engine(
                 feed=feed,
                 strategy=strategy,
-                initial_cash=1000.0,
                 progress=False,
             )
             results.append(engine.run())
@@ -102,8 +97,8 @@ class TestEngineRun:
 class NoOpStrategy(Strategy):
     """Strategy that does nothing — verifies engine runs with no fills."""
 
-    def __init__(self) -> None:
-        super().__init__(name="noop", description="test")
+    def __init__(self, initial_cash: float = 1000.0) -> None:
+        super().__init__(name="noop", description="test", initial_cash=initial_cash)
 
     def on_trade(self, trade: TradeEvent) -> None:
         pass
@@ -112,14 +107,14 @@ class NoOpStrategy(Strategy):
 class TestNoOpRun:
     def test_no_fills(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         feed = KalshiFeed(trades_dir=bt_kalshi_trades_dir, markets_dir=bt_kalshi_markets_dir)
-        engine = Engine(feed=feed, strategy=NoOpStrategy(), initial_cash=1000.0, progress=False)
+        engine = Engine(feed=feed, strategy=NoOpStrategy(), progress=False)
         result = engine.run()
         assert len(result.fills) == 0
         assert result.final_equity == pytest.approx(1000.0)
 
     def test_metrics_zero(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         feed = KalshiFeed(trades_dir=bt_kalshi_trades_dir, markets_dir=bt_kalshi_markets_dir)
-        engine = Engine(feed=feed, strategy=NoOpStrategy(), initial_cash=1000.0, progress=False)
+        engine = Engine(feed=feed, strategy=NoOpStrategy(), progress=False)
         result = engine.run()
         assert result.metrics["total_return"] == pytest.approx(0.0)
 
@@ -127,8 +122,8 @@ class TestNoOpRun:
 class LifecycleTrackingStrategy(Strategy):
     """Tracks lifecycle callbacks for verification."""
 
-    def __init__(self) -> None:
-        super().__init__(name="lifecycle_tracker", description="test")
+    def __init__(self, initial_cash: float = 1000.0) -> None:
+        super().__init__(name="lifecycle_tracker", description="test", initial_cash=initial_cash)
         self.opened: list[str] = []
         self.closed: list[str] = []
         self.resolved: list[tuple[str, Side]] = []
@@ -158,7 +153,7 @@ class TestLifecycle:
     def test_initialize_finalize_called(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         feed = KalshiFeed(trades_dir=bt_kalshi_trades_dir, markets_dir=bt_kalshi_markets_dir)
         strategy = LifecycleTrackingStrategy()
-        engine = Engine(feed=feed, strategy=strategy, initial_cash=1000.0, progress=False)
+        engine = Engine(feed=feed, strategy=strategy, progress=False)
         engine.run()
         assert strategy.initialized
         assert strategy.finalized
@@ -166,7 +161,7 @@ class TestLifecycle:
     def test_market_events_fired(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         feed = KalshiFeed(trades_dir=bt_kalshi_trades_dir, markets_dir=bt_kalshi_markets_dir)
         strategy = LifecycleTrackingStrategy()
-        engine = Engine(feed=feed, strategy=strategy, initial_cash=1000.0, progress=False)
+        engine = Engine(feed=feed, strategy=strategy, progress=False)
         engine.run()
         assert len(strategy.opened) > 0
         assert len(strategy.resolved) > 0
@@ -187,7 +182,6 @@ class TestMarketSample:
         Engine(
             feed=feed_full,
             strategy=LifecycleTrackingStrategy(),
-            initial_cash=1000.0,
             progress=False,
         ).run()
 
@@ -196,7 +190,6 @@ class TestMarketSample:
         Engine(
             feed=feed_sampled,
             strategy=strategy_sampled,
-            initial_cash=1000.0,
             progress=False,
             market_sample=0.34,
         ).run()
@@ -204,7 +197,7 @@ class TestMarketSample:
         # Full run sees all 3 markets open; sampled sees only the top-1 by volume
         full_strategy = LifecycleTrackingStrategy()
         feed_full2 = KalshiFeed(trades_dir=bt_kalshi_trades_dir, markets_dir=bt_kalshi_markets_dir)
-        Engine(feed=feed_full2, strategy=full_strategy, initial_cash=1000.0, progress=False).run()
+        Engine(feed=feed_full2, strategy=full_strategy, progress=False).run()
         assert len(strategy_sampled.opened) < len(full_strategy.opened)
 
     def test_sample_deterministic(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
@@ -215,7 +208,6 @@ class TestMarketSample:
             result = Engine(
                 feed=feed,
                 strategy=AlwaysBuyLowStrategy(),
-                initial_cash=1000.0,
                 progress=False,
                 market_sample=0.5,
             ).run()
@@ -234,7 +226,6 @@ class TestEventLog:
         engine = Engine(
             feed=feed,
             strategy=strategy,
-            initial_cash=1000.0,
             progress=False,
             verbose=False,
         )

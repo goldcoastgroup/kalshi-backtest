@@ -9,17 +9,7 @@ from src.backtesting.strategy import Strategy
 
 
 class GamblingAddictionStrategy(Strategy):
-    """Employs classic gambling tactics on prediction markets.
-
-    Tactics used:
-    - **Martingale**: doubles bet size after each losing market resolution,
-      resets after a win.  The classic "can't lose forever" fallacy.
-    - **Mean-reversion bias**: buys YES on cheap contracts ("it's due!")
-      and NO on expensive ones ("no way that holds").
-    - **Hot hand**: increases bet frequency after a winning streak.
-    - **Max exposure cap**: never commits more than a fixed % of equity
-      to open positions — even degenerates have a credit limit.
-    """
+    """Employs classic gambling tactics on prediction markets."""
 
     def __init__(
         self,
@@ -28,10 +18,12 @@ class GamblingAddictionStrategy(Strategy):
         max_positions: int = 100,
         martingale_cap: int = 4,
         seed: int = 42,
+        initial_cash: float = 10_000.0,
     ):
         super().__init__(
             name="gambling_addiction",
             description="Martingale + mean-reversion + hot hand, 50% max exposure",
+            initial_cash=initial_cash,
         )
         self.base_bet_pct = base_bet_pct
         self.max_exposure = max_exposure

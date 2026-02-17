@@ -133,13 +133,13 @@ def _run_backtest_interactive(strategy, platforms: dict, use_rust: bool = True):
 
     print(f"\n{_ts()}  Running backtest: {strategy.name} on {platform_key}")
     print(f"{_ts()}  Strategy:         {strategy.description}")
-    print(f"{_ts()}  Initial cash:     $10,000.00")
+    print(f"{_ts()}  Initial cash:     ${strategy.initial_cash:,.2f}")
     print(f"{_ts()}  Market sample:    {sample_label}\n")
 
     print(f"{_ts()}  Warming up... Loading markets and indexing trades.")
     print(f"{_ts()}  Keep an eye on your memory usage.\n")
 
-    engine = Engine(feed=feed, strategy=strategy, initial_cash=10_000.0, market_sample=market_sample)
+    engine = Engine(feed=feed, strategy=strategy, market_sample=market_sample)
     result = engine.run()
 
     m = result.metrics
@@ -207,9 +207,113 @@ def _run_backtest_interactive(strategy, platforms: dict, use_rust: bool = True):
             print(f"{_ts()}  {GREEN}Saved.{RESET}\n")
 
 
+def fronttest(name: str | None = None):
+    """Run a strategy against live market data (paper trading)."""
+    import asyncio
+
+    from src.backtesting.front_test_engine import FrontTestEngine
+
+    strategies = Strategy.load()
+    if not strategies:
+        print("No strategies found in src/backtesting/strategies/")
+        return
+
+    # Select strategy
+    if name:
+        instance = None
+        for strategy_cls in strategies:
+            inst = strategy_cls()  # type: ignore[call-arg]
+            if inst.name == name:
+                instance = inst
+                break
+        if instance is None:
+            print(f"Strategy '{name}' not found. Available strategies:")
+            for strategy_cls in strategies:
+                inst = strategy_cls()  # type: ignore[call-arg]
+                print(f"  - {inst.name}: {inst.description}")
+            sys.exit(1)
+    else:
+        options = []
+        for strategy_cls in strategies:
+            inst = strategy_cls()  # type: ignore[call-arg]
+            options.append(f"{_snake_to_title(inst.name)}: {inst.description}")
+        options.append("[Exit]")
+
+        menu = TerminalMenu(
+            options,
+            title="Select a strategy for front testing:",
+            cycle_cursor=True,
+            clear_screen=False,
+        )
+        choice = cast("int | None", menu.show())
+        if choice is None or choice == len(options) - 1:
+            print("Exiting.")
+            return
+        strategy_cls = strategies[choice]
+        instance = strategy_cls()  # type: ignore[call-arg]
+
+    # Select platform
+    platform_options = ["Kalshi", "Polymarket", "[Exit]"]
+    menu = TerminalMenu(
+        platform_options,
+        title="Select live data source:",
+        cycle_cursor=True,
+        clear_screen=False,
+    )
+    platform_choice = cast("int | None", menu.show())
+    if platform_choice is None or platform_choice == 2:
+        print("Exiting.")
+        return
+
+    # Get market identifiers
+    if platform_choice == 0:
+        print("\nEnter Kalshi market tickers to watch (comma-separated, or press Enter for a random active market):")
+        print("  Example: KXBTC-25FEB14-T96000,KXETH-25FEB14-T3000")
+        raw = input("> ").strip()
+        if not raw:
+            from src.backtesting.feeds.kalshi_live import KalshiLiveFeed, fetch_random_kalshi_ticker
+
+            ticker = fetch_random_kalshi_ticker()
+            if not ticker:
+                print("Could not fetch a random market from Kalshi. Exiting.")
+                return
+            print(f"\n{_ts()}  Randomly selected: {ticker}")
+            tickers = [ticker]
+        else:
+            from src.backtesting.feeds.kalshi_live import KalshiLiveFeed
+
+            tickers = [t.strip() for t in raw.split(",") if t.strip()]
+
+        feed = KalshiLiveFeed(market_tickers=tickers)
+    else:
+        print("\nEnter Polymarket condition IDs to watch (comma-separated, or press Enter for a random active market):")
+        print("  Example: 0x1234...,0x5678...")
+        raw = input("> ").strip()
+        if not raw:
+            from src.backtesting.feeds.polymarket_live import PolymarketLiveFeed, fetch_random_polymarket_condition
+
+            condition_id = fetch_random_polymarket_condition()
+            if not condition_id:
+                print("Could not fetch a random market from Polymarket. Exiting.")
+                return
+            print(f"\n{_ts()}  Randomly selected: {condition_id}")
+            condition_ids = [condition_id]
+        else:
+            from src.backtesting.feeds.polymarket_live import PolymarketLiveFeed
+
+            condition_ids = [c.strip() for c in raw.split(",") if c.strip()]
+
+        feed = PolymarketLiveFeed(condition_ids=condition_ids)
+
+    engine = FrontTestEngine(feed=feed, strategy=instance)
+    asyncio.run(engine.run())
+
+
 def main():
     if len(sys.argv) < 2:
-        print("\nUsage: uv run main.py backtest [strategy_name] [--python]")
+        print("\nUsage:")
+        print("  uv run main.py backtest [strategy_name] [--python]")
+        print("  uv run main.py fronttest [strategy_name]")
         sys.exit(0)
 
     command = sys.argv[1]
@@ -222,8 +326,16 @@ def main():
         backtest(name, use_rust=use_rust)
         sys.exit(0)
 
+    if command == "fronttest":
+        args = sys.argv[2:]
+        name = args[0] if args else None
+        fronttest(name)
+        sys.exit(0)
+
     print(f"Unknown command: {command}")
-    print("Usage: uv run main.py backtest [strategy_name] [--python]")
+    print("Usage:")
+    print("  uv run main.py backtest [strategy_name] [--python]")
+    print("  uv run main.py fronttest [strategy_name]")
     sys.exit(1)
 
 

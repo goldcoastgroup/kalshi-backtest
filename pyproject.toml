@@ -5,6 +5,7 @@ description = "Event-driven backtesting engine for prediction market trading str
 requires-python = ">=3.9"
 dependencies = [
     "bokeh>=3.0",
+    "cryptography>=43.0",
     "duckdb>=1.2.1",
     "numpy>=1.24",
     "pandas>=2.2.3",
@@ -12,6 +13,7 @@ dependencies = [
     "pytz>=2024.1",
     "simple-term-menu>=1.6.6",
     "tqdm>=4.67.1",
+    "websockets>=13.0",
 ]
 
 [dependency-groups]

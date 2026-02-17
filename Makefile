@@ -1,10 +1,13 @@
-.PHONY: backtest lint format test setup build-rust
+.PHONY: backtest fronttest lint format test setup build-rust
 
 ANALYSIS = VIRTUAL_ENV= $(MAKE) -C prediction-market-analysis
 RUN = uv run main.py
 
 backtest:
 	$(RUN) backtest $(filter-out $@,$(MAKECMDGOALS))
+
+fronttest:
+	$(RUN) fronttest $(filter-out $@,$(MAKECMDGOALS))
 
 lint:
 	uv run ruff check .

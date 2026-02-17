@@ -15,7 +15,6 @@
 
 An event-driven backtesting engine for prediction market trading strategies. Replays historical trades from [Kalshi](https://kalshi.com) and [Polymarket](https://polymarket.com) in chronological order, simulating order fills, portfolio tracking, and market lifecycle events. The hot loop (broker, portfolio, lifecycle) is compiled to native code via [PyO3](https://pyo3.rs) while strategy callbacks remain in Python. Inspired by [NautilusTrader](https://github.com/nautechsystems/nautilus_trader), plotting inspired by [minitrade](https://github.com/dodid/minitrade).
 
-![Running a backtest](media/running_backtest.gif)
 ![Gambling strategy on Polymarket](media/gambling_strategy_polymarket_1pct.png)
 ![Gambling strategy on Kalshi](media/gambling_strategy_kalshi_1pct.png)
 
@@ -25,6 +24,7 @@ Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/predi
 
 - [x] **Interactive charts** — Bokeh-based HTML charts with linked equity curve, P&L, market prices, drawdown, and cash panels
 - [ ] **Slippage, latency, & liquidity modeling** — these will impact live-deployed strategies, so it's very important to backtest with this taken into account. In low liquidity markets, large orders will eat through the order book and it's important to be aware of this price impact.
+- [x] **Front-testing** — paper trade strategies against live WebSocket data from Kalshi and Polymarket
 - [ ] **Time span selection** — restrict backtests to a specific date range (e.g. `--start 2024-01-01 --end 2024-12-31`)
 - [ ] **Market filtering** — filter by market type, category, or specific market IDs
 - [ ] **Advanced order types** — market orders, stop-losses, take-profit, and time-in-force options
@@ -33,6 +33,7 @@ Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/predi
 ## Current issues
 
 - [ ] High memory usage (42 GB when loading top 1% volume Polymarket data). The bulk of memory comes from the data feed and plotting pipeline — further work needed on streaming/chunked processing.
+- [ ] Live paper-trading with Polymarket & Kalshi has not yet been verified to work fully. It is a WIP.
 
 ## Prerequisites
 
@@ -91,20 +92,38 @@ make backtest
 
 This launches an interactive menu where you select a strategy, platform, and market sample size. Results are printed to the terminal and an event log is saved to `output/`.
 
-<img src="media/backtest.gif" alt="drawing" width="360"/>
-
+<img src="media/running_backtest.gif" alt="Running a backtest" width="600">
 
 To run a specific strategy directly:
 
 ```bash
-make backtest gambling_addiction
+make backtest <strat_name>
 ```
+
+### 6. Front test (live paper trading)
+
+```bash
+make fronttest
+```
+
+This connects to live WebSocket feeds from Kalshi or Polymarket and paper trades your strategy against real-time market data. No real money is used — fills are simulated using the same matching logic as the backtest engine.
+
+You'll be prompted to select a strategy, platform, and market IDs to watch. Press Enter without providing an ID to auto-select a random active market.
+
+To run a specific strategy directly:
+
+```bash
+make fronttest <strat_name>
+```
+
+**Kalshi** requires API credentials — set `KALSHI_API_KEY` and `KALSHI_PRIVATE_KEY_PATH` environment variables. **Polymarket** uses public WebSocket data and needs no authentication.
 
 ## Available Commands
 
 | Command | Description |
 |---|---|
 | `make backtest [name]` | Run a backtest interactively or by strategy name |
+| `make fronttest [name]` | Front test a strategy against live market data (paper trading) |
 | `make build-rust` | Compile the engine |
 | `make setup` | Initialize submodule and download trade data |
 | `make test` | Run the test suite |
@@ -129,10 +148,11 @@ from src.backtesting.strategy import Strategy
 
 
 class MyStrategy(Strategy):
-    def __init__(self):
+    def __init__(self, initial_cash: float = 10_000.0):
         super().__init__(
             name="my_strategy",
             description="Description shown in the menu",
+            initial_cash=initial_cash,
         )
 
     def on_trade(self, trade: TradeEvent) -> None:
@@ -193,6 +213,8 @@ Strategies are auto-discovered — drop a `.py` file in the `strategies/` direct
 ├── src/
 │   └── backtesting/
 │       ├── rust_engine.py           # Python wrapper for the Rust core
+│       ├── front_test_engine.py     # Live paper-trading engine
+│       ├── paper_broker.py          # Pure-Python broker for paper trading
 │       ├── strategy.py              # Abstract strategy base class
 │       ├── models.py                # Data models (TradeEvent, Order, Fill, etc.)
 │       ├── metrics.py               # Performance metric calculations
@@ -206,7 +228,9 @@ Strategies are auto-discovered — drop a `.py` file in the `strategies/` direct
 │       ├── feeds/
 │       │   ├── base.py              # Abstract data feed interface
 │       │   ├── kalshi.py            # Kalshi parquet data feed
-│       │   └── polymarket.py        # Polymarket parquet data feed
+│       │   ├── kalshi_live.py       # Live Kalshi WebSocket feed
+│       │   ├── polymarket.py        # Polymarket parquet data feed
+│       │   └── polymarket_live.py   # Live Polymarket WebSocket feed
 │       └── strategies/              # Auto-discovered strategy files
 │           └── gambling_addiction.py # Martingale + mean-reversion gambling tactics
 ├── tests/                           # Test suite

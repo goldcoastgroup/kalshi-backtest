@@ -41,7 +41,6 @@ class Engine:
         self,
         feed: BaseFeed,
         strategy: Strategy,
-        initial_cash: float = 10_000.0,
         commission_rate: float = 0.01,
         slippage: float = 0.005,
         liquidity_cap: bool = True,
@@ -61,7 +60,7 @@ class Engine:
 
         self.feed = feed
         self.strategy = strategy
-        self.initial_cash = initial_cash
+        self.initial_cash = strategy.initial_cash
         self.commission_rate = commission_rate
         self.slippage = slippage
         self.liquidity_cap = liquidity_cap

@@ -16,14 +16,12 @@
 
 An event-driven backtesting engine for prediction market trading strategies. Replays historical trades from [Kalshi](https://kalshi.com) and [Polymarket](https://polymarket.com) in chronological order, simulating order fills, portfolio tracking, and market lifecycle events. The hot loop (broker, portfolio, lifecycle) is compiled to native code via [PyO3](https://pyo3.rs) while strategy callbacks remain in Python. Inspired by [NautilusTrader](https://github.com/nautechsystems/nautilus_trader), plotting inspired by [minitrade](https://github.com/dodid/minitrade).
 
-These two graphs below are the output of the gambling strategy. Losing money has never looked so good.
+These two graphs below are the output of the gambling strategy. Losing money has never looked so good. [--> Click here for an interactive demo <--](https://evan-kolberg.github.io/prediction-market-backtesting/media/backtest_gambling_addiction_polymarket.html)
 
 <p>
   <img src="media/gambling_strategy_polymarket_1pct.png" alt="Gambling strategy on Polymarket" width="49%">
   <img src="media/gambling_strategy_kalshi_1pct.png" alt="Gambling strategy on Kalshi" width="49%">
-</p>
-
-[Click here for an interactive demo](https://evan-kolberg.github.io/prediction-market-backtesting/media/backtest_gambling_addiction_polymarket.html)
+</p>  
 
 Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/prediction-market-analysis) for data indexing and analysis.
 

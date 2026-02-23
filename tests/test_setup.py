@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Import checks
 # ---------------------------------------------------------------------------
@@ -39,10 +38,7 @@ class TestImports:
         """HAS_RUST is True — confirms the extension loaded at import time."""
         from src.backtesting.rust_engine import HAS_RUST
 
-        assert HAS_RUST, (
-            "Rust engine not available.\n"
-            "Fix: cd crates/backtesting_engine && maturin develop --release"
-        )
+        assert HAS_RUST, "Rust engine not available.\nFix: cd crates/backtesting_engine && maturin develop --release"
 
     def test_engine_class_importable(self) -> None:
         from src.backtesting.rust_engine import Engine  # noqa: F401
@@ -103,10 +99,7 @@ class TestRuntimeDependencies:
         try:
             importlib.import_module(package)
         except ImportError:
-            pytest.fail(
-                f"Required dependency '{package}' is not installed.\n"
-                "Fix: uv sync"
-            )
+            pytest.fail(f"Required dependency '{package}' is not installed.\nFix: uv sync")
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +110,7 @@ class TestRuntimeDependencies:
 class TestEngineSmoke:
     """Engine initializes and runs without errors with minimal valid data."""
 
-    def test_engine_runs_to_completion(
-        self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path
-    ) -> None:
+    def test_engine_runs_to_completion(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         from src.backtesting.feeds.kalshi import KalshiFeed
         from src.backtesting.models import TradeEvent
         from src.backtesting.rust_engine import Engine
@@ -140,9 +131,7 @@ class TestEngineSmoke:
         assert result.initial_cash == 1000.0
         assert result.final_equity == pytest.approx(1000.0)
 
-    def test_engine_returns_backtest_result_type(
-        self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path
-    ) -> None:
+    def test_engine_returns_backtest_result_type(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         from src.backtesting.feeds.kalshi import KalshiFeed
         from src.backtesting.models import BacktestResult, TradeEvent
         from src.backtesting.rust_engine import Engine

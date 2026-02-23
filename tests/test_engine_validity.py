@@ -24,7 +24,6 @@ from src.backtesting.models import TradeEvent
 from src.backtesting.rust_engine import Engine
 from src.backtesting.strategy import Strategy
 
-
 # ---------------------------------------------------------------------------
 # Reusable test strategies
 # ---------------------------------------------------------------------------
@@ -176,7 +175,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "no",
             [
-                (80, "no", 5),   # trade 0 — strategy places buy NO @ 0.25
+                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25
                 (75, "yes", 10),  # trade 1 — no=0.25 ≤ 0.25, taker=yes → FILL
             ],
         )
@@ -189,7 +188,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "no",
             [
-                (80, "no", 5),   # trade 0 — strategy places buy NO @ 0.25
+                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25
                 (75, "no", 10),  # trade 1 — correct price, but taker=no → NO fill
             ],
         )
@@ -202,7 +201,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "yes",
             [
-                (25, "no", 5),   # trade 0 — strategy places sell YES @ 0.30
+                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30
                 (35, "yes", 10),  # trade 1 — yes=0.35 ≥ 0.30, taker=yes → FILL
             ],
         )
@@ -215,7 +214,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "yes",
             [
-                (25, "no", 5),   # trade 0 — strategy places sell YES @ 0.30
+                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30
                 (35, "no", 10),  # trade 1 — correct price, but taker=no → NO fill
             ],
         )
@@ -257,8 +256,8 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "yes",
             [
-                (50, "yes", 5),   # trade 0 — places order #1
-                (50, "yes", 5),   # trade 1 — places order #2 (order #1 doesn't fill: yes > limit)
+                (50, "yes", 5),  # trade 0 — places order #1
+                (50, "yes", 5),  # trade 1 — places order #2 (order #1 doesn't fill: yes > limit)
                 (30, "no", 100),  # trade 2 — yes=0.30 ≤ 0.40, taker=no → fills both
             ],
         )
@@ -317,7 +316,7 @@ class TestResolutionPnL:
             "MKT-X",
             "no",
             [
-                (80, "no", 5),   # trade 0 — places buy NO @ 0.25
+                (80, "no", 5),  # trade 0 — places buy NO @ 0.25
                 (75, "yes", 10),  # trade 1 — no=0.25 ≤ 0.25, taker=yes → fills at 0.25
             ],
         )
@@ -346,7 +345,7 @@ class TestResolutionPnL:
             "MKT-X",
             "yes",
             [
-                (50, "yes", 5),   # trade 0 — places buy YES @ 0.20 (limit below market)
+                (50, "yes", 5),  # trade 0 — places buy YES @ 0.20 (limit below market)
                 (50, "yes", 10),  # trade 1 — taker=yes, wrong side → no fill
             ],
         )
@@ -430,8 +429,8 @@ class TestCashAccounting:
             "MKT-X",
             "yes",
             [
-                (60, "yes", 5),     # trade 0 — places oversized order
-                (50, "no", 1000),   # trade 1 — large liquidity, taker=no → partial fill
+                (60, "yes", 5),  # trade 0 — places oversized order
+                (50, "no", 1000),  # trade 1 — large liquidity, taker=no → partial fill
             ],
         )
         result = Engine(
@@ -610,8 +609,8 @@ class TestOrderCancellation:
             "MKT-X",
             "yes",
             [
-                (50, "yes", 5),   # trade 0 — places 2 orders
-                (50, "yes", 5),   # trade 1 — cancels all
+                (50, "yes", 5),  # trade 0 — places 2 orders
+                (50, "yes", 5),  # trade 1 — cancels all
                 (20, "no", 100),  # trade 2 — would fill both, but all cancelled
             ],
         )
@@ -645,9 +644,7 @@ class TestEquityCurveIntegrity:
             assert math.isfinite(snap.cash), f"Non-finite cash at {snap.timestamp}"
             assert math.isfinite(snap.unrealized_pnl), f"Non-finite unrealized_pnl at {snap.timestamp}"
 
-    def test_noop_equity_curve_stays_constant(
-        self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path
-    ) -> None:
+    def test_noop_equity_curve_stays_constant(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         """A strategy that never trades should have a flat equity curve."""
 
         class NoOp(Strategy):
@@ -681,9 +678,7 @@ class TestEquityCurveIntegrity:
         # The fixture has 10 trades
         assert len(result.equity_curve) >= 10
 
-    def test_num_fills_metric_matches_fills_list(
-        self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path
-    ) -> None:
+    def test_num_fills_metric_matches_fills_list(self, bt_kalshi_trades_dir: Path, bt_kalshi_markets_dir: Path) -> None:
         """result.metrics['num_fills'] must equal len(result.fills)."""
 
         class BuyOnSeen(Strategy):

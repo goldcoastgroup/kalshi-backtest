@@ -136,7 +136,7 @@ class TestMaxDrawdown:
         curve = [
             _snap(0, 10_000.0),
             _snap(1, 12_000.0),  # new peak
-            _snap(2, 9_000.0),   # trough
+            _snap(2, 9_000.0),  # trough
             _snap(3, 11_000.0),
         ]
         m = compute_metrics(curve, [], 10_000.0)
@@ -155,7 +155,7 @@ class TestMaxDrawdown:
         # The very first point is the peak; equity drops immediately
         curve = [
             _snap(0, 10_000.0),
-            _snap(1, 6_000.0),   # dd = (10_000 - 6_000) / 10_000 = 0.40
+            _snap(1, 6_000.0),  # dd = (10_000 - 6_000) / 10_000 = 0.40
         ]
         m = compute_metrics(curve, [], 10_000.0)
         assert m["max_drawdown"] == pytest.approx(0.40)

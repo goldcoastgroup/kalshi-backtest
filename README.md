@@ -22,10 +22,7 @@ These two graphs below are the output of the gambling strategy. Losing money has
 
 [--> Click here for another <--](https://evan-kolberg.github.io/prediction-market-backtesting/media/backtest_gambling_addiction_kalshi.html) ```gambling_addiction.py``` as of engine date Sun Feb 22, 2026 [@85f70d1](/../../commit/85f70d1)
 
-<p>
-  <img src="media/gambling_strategy_polymarket_1pct.png" alt="Gambling strategy on Polymarket" width="49%">
-  <img src="media/gambling_strategy_kalshi_1pct.png" alt="Gambling strategy on Kalshi" width="49%">
-</p>  
+<img src="media/arc_screenshot.png" alt="buy low strat screenshot">
 
 Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/prediction-market-analysis) for data indexing and analysis.
 

@@ -3,8 +3,18 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'media/**'
+      - '**.md'
+      - '.github/workflows/pages.yml'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'media/**'
+      - '**.md'
+      - '.github/workflows/pages.yml'
 
 jobs:
   test:

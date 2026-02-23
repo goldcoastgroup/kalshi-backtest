@@ -26,63 +26,26 @@ These two graphs below are the output of the gambling strategy. Losing money has
 
 Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/prediction-market-analysis) for data indexing and analysis.
 
-<table>
-<tr>
-<td valign="top" width="33%">
+### Table of Contents
 
-<h3>Table of Contents</h3>
-<ul>
-  <li><a href="#how-the-engine-works">How the Engine Works</a></li>
-  <li><a href="#roadmap">Roadmap</a></li>
-  <li><a href="#current-issues">Current issues</a></li>
-  <li><a href="#prerequisites">Prerequisites</a></li>
-  <li><a href="#setup-created-on-macos">Setup</a>
-    <ul>
-      <li><a href="#1-clone-the-repository">1. Clone the repo</a></li>
-      <li><a href="#2-install-dependencies">2. Install dependencies</a></li>
-      <li><a href="#3-build-the-engine">3. Build the engine</a></li>
-      <li><a href="#4-download-the-data">4. Download the data</a></li>
-      <li><a href="#5-run-a-backtest">5. Run a backtest</a></li>
-      <li><a href="#6-front-test-live-paper-trading">6. Front test</a></li>
-    </ul>
-  </li>
-  <li><a href="#available-commands">Available Commands</a></li>
-  <li><a href="#writing-a-strategy">Writing a Strategy</a>
-    <ul>
-      <li><a href="#strategy-api">Strategy API</a></li>
-      <li><a href="#lifecycle-hooks">Lifecycle Hooks</a></li>
-      <li><a href="#properties">Properties</a></li>
-    </ul>
-  </li>
-  <li><a href="#data">Data</a></li>
-  <li><a href="#license">License</a></li>
-</ul>
-
-</td>
-<td valign="top">
-
-<h2 id="how-the-engine-works">How the Engine Works</h2>
-
-<p>Trades replay chronologically. For each trade, the engine checks pending orders for fills, updates the portfolio, then fires <code>on_trade</code> so the strategy can react. The hot loop (order matching, portfolio math) is compiled Rust; strategy callbacks are Python.</p>
-
-<p>A limit buy fills when two things are true:</p>
-<ul>
-  <li>price: the trade price is at or below your limit</li>
-  <li>taker side: the taker is on the sell side; you won't fill against another buyer lifting the ask</li>
-</ul>
-
-<p>Slippage has two components on top of a configurable base fee (default 0.5%):</p>
-<ul>
-  <li>spread cost: scales with distance from 50%; around 1¢ near even odds, up to 5–10¢ near 5%/95%</li>
-  <li>market impact: square-root scaling off a per-market EMA of trade sizes, so a 4x oversized order costs 2x, not 4x</li>
-</ul>
-
-<p>The goal of the slippage model is to punish strategies that only look good under perfect-fill assumptions. It's easy to create optimistic backtests, so it's important to stay conservative. Work is being done to allow strategies to be tested in real-time with fronttesting.</p>
-
-
-</td>
-</tr>
-</table>
+- [Roadmap](#roadmap)
+- [Current issues](#current-issues)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup-created-on-macos)
+  - [1. Clone the repo](#1-clone-the-repository)
+  - [2. Install dependencies](#2-install-dependencies)
+  - [3. Build the engine](#3-build-the-engine)
+  - [4. Download the data](#4-download-the-data)
+  - [5. Run a backtest](#5-run-a-backtest)
+  - [6. Front test](#6-front-test-live-paper-trading)
+- [Available Commands](#available-commands)
+- [Writing a Strategy](#writing-a-strategy)
+  - [Strategy API](#strategy-api)
+  - [Lifecycle Hooks](#lifecycle-hooks)
+  - [Properties](#properties)
+- [Data](#data)
+- [How the Engine Works](#how-the-engine-works)
+- [License](#license)
 
 ## Roadmap
 
@@ -160,8 +123,8 @@ make backtest
 This launches an interactive menu where you select a strategy, platform, and market sample size. Results are printed to the terminal and an event log is saved to `output/`.
 
 <p>
-  <img src="media/running_backtest_2.gif" alt="Gambling strategy on Polymarket" width="49%">
-  <img src="media/results_&_chart.png" alt="Gambling strategy on Kalshi" width="49%">
+  <img src="media/running_backtest_2.gif" alt="Gambling strategy on Polymarket" width="56%">
+  <img src="media/results_&_chart.png" alt="Gambling strategy on Kalshi" width="43%">
 </p>
 
 To run a specific strategy directly:
@@ -280,13 +243,25 @@ Historical trade data is sourced from the [prediction-market-analysis](https://g
 | Kalshi | Markets metadata + individual trades with prices in cents (1–99) |
 | Polymarket | On-chain CTF Exchange trade executions (OrderFilled events from Polygon) joined with block timestamps. Not CLOB order book data — only filled trades are available. |
 
+## How the Engine Works
+
+Trades replay chronologically. For each trade, the engine checks pending orders for fills, updates the portfolio, then fires `on_trade` so the strategy can react. The hot loop (order matching, portfolio math) is compiled Rust; strategy callbacks are Python.
+
+A limit buy fills when two things are true:
+- **price:** the trade price is at or below your limit
+- **taker side:** the taker is on the sell side; you won't fill against another buyer lifting the ask
+
+Slippage has two components on top of a configurable base fee (default 0.5%):
+- **spread cost:** scales with distance from 50%; around 1¢ near even odds, up to 5–10¢ near 5%/95%
+- **market impact:** square-root scaling off a per-market EMA of trade sizes, so a 4x oversized order costs 2x, not 4x
+
+The goal of the slippage model is to punish strategies that only look good under perfect-fill assumptions. It's easy to create optimistic backtests, so it's important to stay conservative. Work is being done to allow strategies to be tested in real-time with fronttesting.
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 ---
-
-## Star History
 
 ## Star History
 

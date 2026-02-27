@@ -235,7 +235,13 @@ class PolymarketFeed(BaseFeed):
                     THEN t.taker_amount::DOUBLE / 1e6
                     ELSE t.maker_amount::DOUBLE / 1e6
                 END AS quantity,
-                t.transaction_hash
+                t.transaction_hash,
+                CASE
+                    WHEN t.maker_asset_id::VARCHAR = '0' AND tm.outcome_idx = 0 THEN 'no'
+                    WHEN t.maker_asset_id::VARCHAR = '0' AND tm.outcome_idx = 1 THEN 'yes'
+                    WHEN t.maker_asset_id::VARCHAR != '0' AND tm.outcome_idx = 0 THEN 'yes'
+                    ELSE 'no'
+                END AS taker_side_str
             FROM '{self.trades_dir}/*.parquet' t
             JOIN '{self.blocks_dir}/*.parquet' b ON t.block_number = b.block_number
             JOIN _token_map tm ON (
@@ -259,7 +265,7 @@ class PolymarketFeed(BaseFeed):
             if not rows:
                 break
 
-            for ts, market_id, outcome_idx, price, quantity, tx_hash in rows:
+            for ts, market_id, outcome_idx, price, quantity, tx_hash, taker_side_str in rows:
                 if price is None or price <= 0:
                     continue
 
@@ -269,10 +275,8 @@ class PolymarketFeed(BaseFeed):
 
                 if outcome_idx == 0:
                     yes_price = min(max(price, 0.0), 1.0)
-                    taker_side = Side.YES
                 else:
                     yes_price = min(max(1.0 - price, 0.0), 1.0)
-                    taker_side = Side.NO
 
                 yield TradeEvent(
                     timestamp=timestamp,
@@ -281,7 +285,7 @@ class PolymarketFeed(BaseFeed):
                     yes_price=yes_price,
                     no_price=1.0 - yes_price,
                     quantity=quantity,
-                    taker_side=taker_side,
+                    taker_side=Side.YES if taker_side_str == "yes" else Side.NO,
                     raw_id=tx_hash,
                 )
 

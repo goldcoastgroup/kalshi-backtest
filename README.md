@@ -50,9 +50,8 @@ Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/predi
 ## Roadmap
 
 - [x] **Interactive charts** — Bokeh-based HTML charts with linked equity curve, P&L, market prices, drawdown, and cash panels
-- [x] **Slippage, latency, & liquidity modeling** — taker-side-aware fill logic, price-proportional spread cost, and square-root market impact
+- [x] **CLOB fill model** — taker-side-aware fill matching, exchange-accurate commission formulas, and liquidity cap
 - [x] **Front-testing** — paper trade strategies against live WebSocket data from Polymarket (Kalshi coming soon); auto-selects ~30 active markets with real-time price/volume display
-- [ ] **Assess backtesting engine validity** - It'll  be a good idea to validate the quality of this engine with fronttesting
 - [ ] **Front-testing** - more work has to be done on allowing the user to have more control over how the front-testing works. An arbitrary number of 30 markets will soon need to be variable since strategies come in all types.
 - [ ] **Market filtering** — filter by market type, category, or specific market IDs
 - [ ] **Advanced order types** — market orders, stop-losses, take-profit, and time-in-force options
@@ -61,7 +60,6 @@ Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/predi
 
 - [ ] High memory usage (42 GB when loading top 1% volume Polymarket data). The bulk of memory comes from the data feed and plotting pipeline — further work needed on streaming/chunked processing.
 - [ ] Kalshi front testing is not yet available — requires API credential wiring and has not been verified end-to-end.
-- [ ] More testing of the backtesting engine must be done in order to verify its claims
 
 <img src="media/engine_diagram.png" alt="Engine Architecture Diagram" width="100%">
 
@@ -246,17 +244,58 @@ Historical trade data is sourced from the [prediction-market-analysis](https://g
 
 ## How the Engine Works
 
-Trades replay chronologically. For each trade, the engine checks pending orders for fills, updates the portfolio, then fires `on_trade` so the strategy can react. The hot loop (order matching, portfolio math) is compiled Rust; strategy callbacks are Python.
+Historical trades replay in strict chronological order. For each trade the engine:
 
-A limit buy fills when two things are true:
-- **price:** the trade price is at or below your limit
-- **taker side:** the taker is on the sell side; you won't fill against another buyer lifting the ask
+1. Fires any pending lifecycle events (`on_market_open`, `on_market_close`, `on_market_resolve`) whose timestamps have been crossed
+2. Updates the portfolio's mark-to-market price
+3. Calls `on_trade` — any orders placed here are eligible to fill against the current trade
+4. Runs fill matching across all pending limit orders
+5. Takes a periodic portfolio snapshot
 
-Slippage has two components on top of a configurable base fee (default 0.5%):
-- **spread cost:** scales with distance from 50%; around 1¢ near even odds, up to 5–10¢ near 5%/95%
-- **market impact:** square-root scaling off a per-market EMA of trade sizes, so a 4x oversized order costs 2x, not 4x
+The hot loop (fill matching, position accounting, lifecycle events) is compiled Rust via PyO3; strategy callbacks execute in Python.
 
-The goal of the slippage model is to punish strategies that only look good under perfect-fill assumptions. It's easy to create optimistic backtests, so it's important to stay conservative. Work is being done to allow strategies to be tested in real-time with fronttesting.
+### Fill semantics
+
+The engine mirrors how Kalshi (CLOB) and Polymarket (CTF CLOB) actually work. A resting limit order fills only when **both** conditions are met:
+
+| Order | Price condition | Taker-side condition |
+|---|---|---|
+| Buy YES | `trade.yes_price ≤ order.price` | `taker_side == NO` — a seller hit your bid |
+| Sell YES | `trade.yes_price ≥ order.price` | `taker_side == YES` — a buyer lifted your ask |
+| Buy NO | `trade.no_price ≤ order.price` | `taker_side == YES` — a YES buyer = NO seller came to you |
+| Sell NO | `trade.no_price ≥ order.price` | `taker_side == NO` — a NO buyer lifted your ask |
+
+Without the taker-side filter, a limit buy would fill even when the market is rallying (taker is also buying) — a situation where your resting bid would never be touched. This is the most common source of look-ahead bias in prediction-market backtests.
+
+Because `on_trade` fires before fill matching, a strategy that places a limit order inside `on_trade` is immediately eligible to fill against the same trade — giving realistic "fill at the price you see" semantics, subject to the taker-side constraint above.
+
+Fill price is always the **trade's market price**, never worse than the limit (limit orders cannot get a worse fill than the price they specify).
+
+### Commission
+
+Two fee models, auto-detected from platform:
+
+| Platform | Formula | Default rate | Notes |
+|---|---|---|---|
+| **Kalshi** | `rate × P × (1−P) × qty` | 7% | Matches Kalshi's published schedule exactly. Max 1.75¢/contract at P = 0.50. Both buys and sells are charged. |
+| **Polymarket** | `rate × P × qty` | 0.1% | Polymarket makers officially pay 0%; takers pay 2%. The 0.1% default adds conservative friction to avoid strategies that are only profitable because they assume zero cost. |
+
+### Liquidity cap
+
+With `liquidity_cap=True` (default), each fill is limited to the volume of the triggering trade. You cannot buy more contracts than actually traded in that tick — a basic sanity constraint that prevents oversized fills in illiquid markets.
+
+### Slippage / market impact
+
+A market-impact model (`apply_market_impact`) combining price-proportional spread widening and square-root order-size scaling is implemented, but is **not applied to resting limit orders**. Limit orders by definition execute at their stated price; the model is reserved for future aggressive (market/taker) order support. Passing `slippage > 0` to the engine currently has no effect on fill prices.
+
+### Settlement
+
+At resolution, positions pay out $1 per contract to the winning side:
+
+- **Long YES** at cost P per contract → profit `1 − P` per contract if YES wins, total loss `P` per contract if NO wins
+- **Long NO** at cost P per contract → profit `1 − P` per contract if NO wins, total loss `P` per contract if YES wins
+
+Markets resolve on their recorded `close_time` using the result from the data feed. Pending orders for a resolved market are cancelled automatically.
 
 ## License
 

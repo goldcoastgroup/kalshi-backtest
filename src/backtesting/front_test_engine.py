@@ -173,7 +173,13 @@ class FrontTestEngine:
                     self._first_trade_time = trade.timestamp
                 self._last_trade_time = trade.timestamp
 
-                # Check fills against pending orders
+                # Strategy processes the trade first — mirrors the Rust backtest
+                # hot loop where on_trade fires before check_fills, so orders
+                # placed reactively in on_trade are eligible to fill on the
+                # same trade ("buy at the price you see" semantics).
+                self.strategy.on_trade(trade)
+
+                # Check fills against pending orders (including any just placed)
                 fills = self.broker.check_fills(trade)
                 for fill in fills:
                     self._fill_count += 1
@@ -190,9 +196,6 @@ class FrontTestEngine:
                 # Record equity snapshot
                 snap = self.broker.get_portfolio_snapshot()
                 self._equity_curve.append(snap)
-
-                # Strategy processes the trade
-                self.strategy.on_trade(trade)
 
                 # Periodic status
                 now = time.monotonic()

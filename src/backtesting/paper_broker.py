@@ -148,12 +148,14 @@ class PaperBroker:
                 continue
 
             cost = fill_price * fill_qty
-            # Kalshi fee: commission_rate × P × (1 − P) × qty
-            commission = self.commission_rate * fill_price * (1 - fill_price) * fill_qty
+            # Kalshi fee: commission_rate × P × (1−P) × qty  (flat_commission=False)
+            # Polymarket fee: commission_rate × P × qty        (flat_commission=True)
+            fee_factor = 1.0 if self.flat_commission else (1 - fill_price)
+            commission = self.commission_rate * fill_price * fee_factor * fill_qty
 
             if order.action == OrderAction.BUY and cost + commission > cash:
                 if self.liquidity_cap:
-                    max_qty = cash / (fill_price * (1 + self.commission_rate * (1 - fill_price)))
+                    max_qty = cash / (fill_price * (1 + self.commission_rate * fee_factor))
                     fill_qty = min(fill_qty, max_qty)
                     if fill_qty < 1.0:
                         continue
@@ -244,21 +246,25 @@ class PaperBroker:
 
     @staticmethod
     def _match_order(order: Order, trade: TradeEvent) -> float | None:
-        # Pure price-condition matching — mirrors Rust broker logic.
-        # Because on_trade fires before check_fills, a strategy that places an
-        # order inside on_trade fills at the same trade's price: "buy at the
-        # price you see." No taker-side filter to avoid selection bias.
+        # CLOB fill semantics — mirrors Rust broker logic.
+        # A resting limit order fills when the price condition is met AND the
+        # taker is on the opposite side of the book, matching how Kalshi and
+        # Polymarket actually work:
+        #   BUY  YES: price ≤ limit AND taker_side == NO  (seller hit the bid)
+        #   SELL YES: price ≥ limit AND taker_side == YES (buyer lifted the ask)
+        #   BUY  NO:  price ≤ limit AND taker_side == YES (YES buyer = NO seller)
+        #   SELL NO:  price ≥ limit AND taker_side == NO  (NO buyer lifted the ask)
         if order.action == OrderAction.BUY and order.side == Side.YES:
-            if trade.yes_price <= order.price:
+            if trade.yes_price <= order.price and trade.taker_side == Side.NO:
                 return trade.yes_price
         elif order.action == OrderAction.SELL and order.side == Side.YES:
-            if trade.yes_price >= order.price:
+            if trade.yes_price >= order.price and trade.taker_side == Side.YES:
                 return trade.yes_price
         elif order.action == OrderAction.BUY and order.side == Side.NO:
-            if trade.no_price <= order.price:
+            if trade.no_price <= order.price and trade.taker_side == Side.YES:
                 return trade.no_price
         elif order.action == OrderAction.SELL and order.side == Side.NO:
-            if trade.no_price >= order.price:
+            if trade.no_price >= order.price and trade.taker_side == Side.NO:
                 return trade.no_price
         return None
 

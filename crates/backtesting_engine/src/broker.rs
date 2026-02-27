@@ -37,43 +37,54 @@ pub struct Broker {
 
 /// Check if an order should fill against a trade. Returns fill price if matched.
 ///
-/// Pure price-condition matching: a resting limit order fills whenever the trade
-/// price satisfies the order's limit. This is the correct model for backtesting
-/// calibration strategies with discrete trade data — the strategy fires on_trade,
-/// immediately places a limit order, and that order fills on the same trade event
-/// (because on_trade fires before check_fills). The fill price therefore equals
-/// the trade price that triggered the strategy, giving clean "buy at the price
-/// you see" semantics with no look-ahead or selection bias.
+/// CLOB fill semantics: a resting limit order fills when BOTH the price
+/// condition is satisfied AND the taker is on the opposite side of the book.
+/// This mirrors how Kalshi (CLOB) and Polymarket (CTF CLOB) actually work:
+/// a resting buy can only be hit by an aggressive seller, and a resting sell
+/// can only be hit by an aggressive buyer.
 ///
-///   YES bid fills when trade.yes_price <= order.price  (price is in our range)
-///   YES ask fills when trade.yes_price >= order.price
-///   NO  bid fills when trade.no_price  <= order.price
-///   NO  ask fills when trade.no_price  >= order.price
+///   BUY  YES: trade.yes_price <= order.price  AND taker_side == No
+///   SELL YES: trade.yes_price >= order.price  AND taker_side == Yes
+///   BUY  NO:  trade.no_price  <= order.price  AND taker_side == Yes
+///   SELL NO:  trade.no_price  >= order.price  AND taker_side == No
+///
+/// The taker_side == Yes convention: someone aggressively bought YES
+/// (equivalently: aggressively sold NO).
+///
+/// Because on_trade fires before check_fills in the engine hot loop, a strategy
+/// that places a limit order inside on_trade is eligible to fill against the
+/// same trade event — giving "fill at the price you see" semantics for reactive
+/// strategies, while the taker-side filter prevents fills in cases where the
+/// market is moving away from you (same-side taker).
 fn match_order(order: &Order, trade: &Trade) -> Option<f64> {
     match (order.action, order.side) {
+        // Resting buy YES fills when an aggressive seller (taker_side=No) hits the bid.
         (OrderAction::Buy, Side::Yes) => {
-            if trade.yes_price <= order.price {
+            if trade.yes_price <= order.price && trade.taker_side == Side::No {
                 Some(trade.yes_price)
             } else {
                 None
             }
         }
+        // Resting sell YES fills when an aggressive buyer (taker_side=Yes) lifts the ask.
         (OrderAction::Sell, Side::Yes) => {
-            if trade.yes_price >= order.price {
+            if trade.yes_price >= order.price && trade.taker_side == Side::Yes {
                 Some(trade.yes_price)
             } else {
                 None
             }
         }
+        // Resting buy NO fills when a YES buyer (taker_side=Yes, i.e. NO seller) hits the bid.
         (OrderAction::Buy, Side::No) => {
-            if trade.no_price <= order.price {
+            if trade.no_price <= order.price && trade.taker_side == Side::Yes {
                 Some(trade.no_price)
             } else {
                 None
             }
         }
+        // Resting sell NO fills when a NO buyer (taker_side=No) lifts the ask.
         (OrderAction::Sell, Side::No) => {
-            if trade.no_price >= order.price {
+            if trade.no_price >= order.price && trade.taker_side == Side::No {
                 Some(trade.no_price)
             } else {
                 None

@@ -184,7 +184,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "no",
             [
-                (80, "no", 5),   # trade 0 — strategy places buy NO @ 0.25; no=0.20 ≤ 0.25 but taker=NO → no fill
+                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25; no=0.20 ≤ 0.25 but taker=NO → no fill
                 (75, "yes", 10),  # trade 1 — no=0.25 ≤ 0.25, taker=YES → FILL
             ],
         )
@@ -197,7 +197,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "no",
             [
-                (80, "no", 5),   # trade 0 — strategy places buy NO @ 0.25; no=0.20 ≤ 0.25 but taker=NO → no fill
+                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25; no=0.20 ≤ 0.25 but taker=NO → no fill
                 (75, "no", 10),  # trade 1 — no=0.25 ≤ 0.25, taker=NO → NO FILL
             ],
         )
@@ -210,7 +210,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "yes",
             [
-                (25, "no", 5),   # trade 0 — strategy places sell YES @ 0.30; yes=0.25 < 0.30, no fill
+                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30; yes=0.25 < 0.30, no fill
                 (35, "yes", 10),  # trade 1 — yes=0.35 ≥ 0.30, taker=YES → FILL
             ],
         )
@@ -223,7 +223,7 @@ class TestCLOBFillSemantics:
             "MKT-X",
             "yes",
             [
-                (25, "no", 5),   # trade 0 — strategy places sell YES @ 0.30; yes=0.25 < 0.30, no fill
+                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30; yes=0.25 < 0.30, no fill
                 (35, "no", 10),  # trade 1 — yes=0.35 ≥ 0.30, but taker=NO → NO FILL
             ],
         )

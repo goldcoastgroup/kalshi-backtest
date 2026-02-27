@@ -45,14 +45,16 @@ class PaperBroker:
     def __init__(
         self,
         initial_cash: float,
-        commission_rate: float = 0.01,
-        slippage: float = 0.005,
+        commission_rate: float = 0.07,
+        flat_commission: bool = False,
+        slippage: float = 0.0,
         liquidity_cap: bool = True,
         ema_decay: float = 0.1,
     ):
         self.cash = initial_cash
         self.initial_cash = initial_cash
         self.commission_rate = commission_rate
+        self.flat_commission = flat_commission
         self.slippage = slippage
         self.liquidity_cap = liquidity_cap
         self.ema_decay = ema_decay
@@ -114,7 +116,8 @@ class PaperBroker:
         """Check pending orders for this trade's market.  Returns fills."""
         self._last_prices[trade.market_id] = trade.yes_price
 
-        # Update EMA of trade size for market impact model
+        # Update EMA of trade size — retained for potential future taker-order
+        # market-impact calculations, not used for resting limit order fills.
         mid = trade.market_id
         if mid in self._ema_trade_sizes:
             self._ema_trade_sizes[mid] = (
@@ -122,7 +125,6 @@ class PaperBroker:
             )
         else:
             self._ema_trade_sizes[mid] = trade.quantity
-        avg_trade_size = self._ema_trade_sizes[mid]
 
         orders = self._pending.get(trade.market_id)
         if not orders:
@@ -138,24 +140,26 @@ class PaperBroker:
             if fill_price is None:
                 continue
 
-            fill_price = self._apply_slippage(fill_price, order.action, order.quantity, avg_trade_size)
-
+            # fill_price = actual trade price (maker fill — no additional impact).
+            # Resting limit orders are on the passive side of the book; they receive
+            # the quoted price without paying a spread. Commission is the only cost.
             fill_qty = min(order.quantity, remaining_liq) if self.liquidity_cap else order.quantity
             if fill_qty <= 0:
                 continue
 
             cost = fill_price * fill_qty
-            commission = cost * self.commission_rate
+            # Kalshi fee: commission_rate × P × (1 − P) × qty
+            commission = self.commission_rate * fill_price * (1 - fill_price) * fill_qty
 
             if order.action == OrderAction.BUY and cost + commission > cash:
                 if self.liquidity_cap:
-                    max_qty = cash / (fill_price * (1 + self.commission_rate))
+                    max_qty = cash / (fill_price * (1 + self.commission_rate * (1 - fill_price)))
                     fill_qty = min(fill_qty, max_qty)
                     if fill_qty < 1.0:
                         continue
                     fill_qty = float(int(fill_qty))
                     cost = fill_price * fill_qty
-                    commission = cost * self.commission_rate
+                    commission = self.commission_rate * fill_price * (1 - fill_price) * fill_qty
                 else:
                     continue
 
@@ -240,19 +244,21 @@ class PaperBroker:
 
     @staticmethod
     def _match_order(order: Order, trade: TradeEvent) -> float | None:
-        # Taker-side-aware: a resting limit order only fills when the taker is on
-        # the opposite side (mirrors the Rust broker logic).
+        # Pure price-condition matching — mirrors Rust broker logic.
+        # Because on_trade fires before check_fills, a strategy that places an
+        # order inside on_trade fills at the same trade's price: "buy at the
+        # price you see." No taker-side filter to avoid selection bias.
         if order.action == OrderAction.BUY and order.side == Side.YES:
-            if trade.taker_side == Side.NO and trade.yes_price <= order.price:
+            if trade.yes_price <= order.price:
                 return trade.yes_price
         elif order.action == OrderAction.SELL and order.side == Side.YES:
-            if trade.taker_side == Side.YES and trade.yes_price >= order.price:
+            if trade.yes_price >= order.price:
                 return trade.yes_price
         elif order.action == OrderAction.BUY and order.side == Side.NO:
-            if trade.taker_side == Side.YES and trade.no_price <= order.price:
+            if trade.no_price <= order.price:
                 return trade.no_price
         elif order.action == OrderAction.SELL and order.side == Side.NO:
-            if trade.taker_side == Side.NO and trade.no_price >= order.price:
+            if trade.no_price >= order.price:
                 return trade.no_price
         return None
 

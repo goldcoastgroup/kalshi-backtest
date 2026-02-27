@@ -16,11 +16,11 @@
 
 An event-driven backtesting engine for prediction market trading strategies. Replays historical trades from [Kalshi](https://kalshi.com) and [Polymarket](https://polymarket.com) in chronological order, simulating order fills, portfolio tracking, and market lifecycle events. The hot loop (broker, portfolio, lifecycle) is compiled to native code via [PyO3](https://pyo3.rs) while strategy callbacks remain in Python. Inspired by [NautilusTrader](https://github.com/nautechsystems/nautilus_trader), plotting inspired by [minitrade](https://github.com/dodid/minitrade).
 
-These two graphs below are the output of the gambling strategy. Losing money has never looked so good.
+Take a look at some example graphs below. Losing money has never looked so good.
 
-[--> Click here for an interactive demo <--](https://evan-kolberg.github.io/prediction-market-backtesting/media/backtest_buy_low_polymarket.html) ```buy_low.py``` as of engine date Sun Feb 22, 2026 [@85f70d1](/../../commit/85f70d1)
+[--> Click here for an interactive demo <--](https://evan-kolberg.github.io/prediction-market-backtesting/media/backtest_buy_low_polymarket.html) ```buy_low.py``` as of engine date: Fri Feb 27, 2026 commit #39
 
-[--> Click here for another <--](https://evan-kolberg.github.io/prediction-market-backtesting/media/backtest_gambling_addiction_kalshi.html) ```gambling_addiction.py``` as of engine date Sun Feb 22, 2026 [@85f70d1](/../../commit/85f70d1)
+[--> Click here for another <--](https://evan-kolberg.github.io/prediction-market-backtesting/media/backtest_gambling_addiction_kalshi.html) ```gambling_addiction.py``` as of engine date: Fri Feb 27, 2026 commit #39
 
 <img src="media/arc_screenshot.png" alt="buy low strat screenshot">
 
@@ -61,6 +61,7 @@ Built on top of [prediction-market-analysis](https://github.com/Jon-Becker/predi
 
 - [ ] High memory usage (42 GB when loading top 1% volume Polymarket data). The bulk of memory comes from the data feed and plotting pipeline — further work needed on streaming/chunked processing.
 - [ ] Kalshi front testing is not yet available — requires API credential wiring and has not been verified end-to-end.
+- [ ] More testing of the backtesting engine must be done in order to verify its claims
 
 <img src="media/engine_diagram.png" alt="Engine Architecture Diagram" width="100%">
 

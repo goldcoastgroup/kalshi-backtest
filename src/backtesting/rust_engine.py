@@ -41,8 +41,9 @@ class Engine:
         self,
         feed: BaseFeed,
         strategy: Strategy,
-        commission_rate: float = 0.01,
-        slippage: float = 0.005,
+        commission_rate: float | None = None,
+        flat_commission: bool | None = None,
+        slippage: float = 0.0,
         liquidity_cap: bool = True,
         snapshot_interval: int = 1000,
         market_ids: list[str] | None = None,
@@ -61,7 +62,8 @@ class Engine:
         self.feed = feed
         self.strategy = strategy
         self.initial_cash = strategy.initial_cash
-        self.commission_rate = commission_rate
+        self.commission_rate = commission_rate  # None = auto-detect from platform
+        self.flat_commission = flat_commission  # None = auto-detect from platform
         self.slippage = slippage
         self.liquidity_cap = liquidity_cap
         self.snapshot_interval = snapshot_interval
@@ -77,15 +79,6 @@ class Engine:
         """Execute the full simulation and return results."""
         wall_start = time.monotonic()
         logger = BacktestLogger(print_live=True)
-
-        # -- Create Rust engine --
-        rust = _RustEngine(
-            initial_cash=self.initial_cash,
-            commission_rate=self.commission_rate,
-            slippage=self.slippage,
-            liquidity_cap=self.liquidity_cap,
-            snapshot_interval=self.snapshot_interval,
-        )
 
         all_markets = self.feed.markets()
 
@@ -109,6 +102,36 @@ class Engine:
         if all_markets:
             first_market = next(iter(all_markets.values()))
             platform = first_market.platform
+
+        # -- Resolve commission settings (auto-detect from platform if not set) --
+        is_polymarket = platform == Platform.POLYMARKET
+        commission_rate = (
+            self.commission_rate if self.commission_rate is not None else (0.001 if is_polymarket else 0.07)
+        )
+        flat_commission = self.flat_commission if self.flat_commission is not None else is_polymarket
+
+        # -- Create Rust engine --
+        # The compiled Rust extension's __new__ signature has changed over
+        # time; some builds do not accept `flat_commission` as a keyword.
+        # Try the full keyword call first, then fall back to a call without
+        # `flat_commission` for older/alternate builds.
+        try:
+            rust = _RustEngine(
+                initial_cash=self.initial_cash,
+                commission_rate=commission_rate,
+                flat_commission=flat_commission,
+                slippage=self.slippage,
+                liquidity_cap=self.liquidity_cap,
+                snapshot_interval=self.snapshot_interval,
+            )
+        except TypeError:
+            rust = _RustEngine(
+                initial_cash=self.initial_cash,
+                commission_rate=commission_rate,
+                slippage=self.slippage,
+                liquidity_cap=self.liquidity_cap,
+                snapshot_interval=self.snapshot_interval,
+            )
 
         # -- Wire strategy to Rust engine --
         def _place_order(market_id, action, side, price, quantity, timestamp=None):

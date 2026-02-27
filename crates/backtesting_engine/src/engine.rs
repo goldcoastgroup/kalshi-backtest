@@ -201,6 +201,12 @@ fn build_lifecycle_events(
 pub struct RustEngine {
     initial_cash: f64,
     commission_rate: f64,
+    /// true  → flat fee: rate × P × qty  (Polymarket)
+    /// false → parabolic: rate × P × (1−P) × qty  (Kalshi)
+    flat_commission: bool,
+    /// Retained in the public API for future aggressive/market-order support.
+    /// Not currently applied to resting limit-order fills (maker fills).
+    #[allow(dead_code)]
     slippage: f64,
     liquidity_cap: bool,
     snapshot_interval: u64,
@@ -213,10 +219,11 @@ pub struct RustEngine {
 #[pymethods]
 impl RustEngine {
     #[new]
-    #[pyo3(signature = (initial_cash=10_000.0, commission_rate=0.01, slippage=0.005, liquidity_cap=true, snapshot_interval=1000, ema_decay=0.1))]
+    #[pyo3(signature = (initial_cash=10_000.0, commission_rate=0.07, flat_commission=false, slippage=0.0, liquidity_cap=true, snapshot_interval=1000, ema_decay=0.1))]
     fn new(
         initial_cash: f64,
         commission_rate: f64,
+        flat_commission: bool,
         slippage: f64,
         liquidity_cap: bool,
         snapshot_interval: u64,
@@ -225,11 +232,12 @@ impl RustEngine {
         Self {
             initial_cash,
             commission_rate,
+            flat_commission,
             slippage,
             liquidity_cap,
             snapshot_interval,
             ema_decay,
-            broker: RefCell::new(Broker::new(commission_rate, slippage, liquidity_cap, ema_decay)),
+            broker: RefCell::new(Broker::new(commission_rate, flat_commission, liquidity_cap, ema_decay)),
             portfolio: RefCell::new(Portfolio::new(initial_cash)),
             current_ts: Cell::new(0.0),
         }
@@ -298,7 +306,7 @@ impl RustEngine {
     ) -> PyResult<PyObject> {
         // Reset state
         *self.broker.borrow_mut() =
-            Broker::new(self.commission_rate, self.slippage, self.liquidity_cap, self.ema_decay);
+            Broker::new(self.commission_rate, self.flat_commission, self.liquidity_cap, self.ema_decay);
         *self.portfolio.borrow_mut() = Portfolio::new(self.initial_cash);
         self.current_ts.set(0.0);
 
@@ -425,7 +433,11 @@ impl RustEngine {
             // 3. Update mark-to-market price
             self.portfolio.borrow_mut().update_price(&trade.market_id, trade.yes_price);
 
-            // 4. Update EMA trade size (used by market impact model), then check fills
+            // 4. Strategy on_trade fires FIRST so any orders placed here fill at
+            //    this trade's price (clean "buy at the price you see" semantics).
+            strategy.call_method1(intern!(py, "on_trade"), (&py_trade,))?;
+
+            // 5. Update EMA trade size (used by market impact model), then check fills
             self.broker.borrow_mut().update_trade_size(&trade.market_id, trade.quantity);
             let cash = self.portfolio.borrow().cash;
             let fills = self.broker.borrow_mut().check_fills(&trade, cash);
@@ -501,9 +513,6 @@ impl RustEngine {
                     emit_log(write_fn, &log_line(now, "Portfolio", &msg, ""))?;
                 }
             }
-
-            // 5. Strategy on_trade
-            strategy.call_method1(intern!(py, "on_trade"), (&py_trade,))?;
 
             // 6. Periodic snapshot
             trade_count += 1;
@@ -657,11 +666,16 @@ impl RustEngine {
         }
         dict.set_item("market_prices", prices_dict)?;
 
-        // market_pnls
+        // market_pnls — realized_pnl minus per-market commission costs
+        let mut market_commission: HashMap<&str, f64> = HashMap::new();
+        for fill in all_fills {
+            *market_commission.entry(fill.market_id.as_str()).or_insert(0.0) += fill.commission;
+        }
         let pnls_dict = PyDict::new_bound(py);
         for mid in &markets_traded {
             if let Some(pos) = portfolio.positions.get(*mid) {
-                pnls_dict.set_item(*mid, pos.realized_pnl)?;
+                let commission = market_commission.get(mid.as_str()).copied().unwrap_or(0.0);
+                pnls_dict.set_item(*mid, pos.realized_pnl - commission)?;
             }
         }
         dict.set_item("market_pnls", pnls_dict)?;

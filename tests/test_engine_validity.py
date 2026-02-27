@@ -1,13 +1,13 @@
-"""Engine validity tests — CLOB fill semantics, P&L math, cash conservation, slippage.
+"""Engine validity tests — fill semantics, P&L math, cash conservation, slippage.
 
 These tests use controlled single-market datasets to verify that the engine's
 core logic is correct independent of strategy complexity.  Each test class
 targets one specific property of the simulation:
 
-  * TestCLOBFillSemantics  — taker-side-aware fill conditions
+  * TestCLOBFillSemantics  — pure price-condition fill semantics
   * TestResolutionPnL      — settlement payouts (YES/NO × long YES/NO)
   * TestCashAccounting     — commission deduction, no-leverage enforcement
-  * TestSlippage           — market impact worsens buy prices
+  * TestSlippage           — slippage parameter behaviour (not applied to maker fills)
   * TestOrderCancellation  — cancelled orders never fill
   * TestEquityCurveIntegrity — equity curve values are finite and consistent
 """
@@ -119,40 +119,46 @@ def _engine(
 
 
 class TestCLOBFillSemantics:
-    """Taker-side-aware order matching: orders only fill against the opposing side.
+    """Pure price-condition fill semantics.
 
-    The engine models a CLOB where:
-      YES bid fills when a NO taker sells YES into the book.
-      YES ask fills when a YES taker buys YES, lifting the ask.
-      NO  bid fills when a YES taker sells NO  into the book.
+    The engine uses pure price-condition matching — no taker-side filter.
+    on_trade fires before check_fills, so an order placed in on_trade fills
+    against the same trade that triggered it ("buy at the price you see").
+
+    A resting limit order fills whenever the trade price satisfies the limit,
+    regardless of which side initiated the trade:
+      BUY  YES fills when trade.yes_price <= order.price
+      SELL YES fills when trade.yes_price >= order.price
+      BUY  NO  fills when trade.no_price  <= order.price
+      SELL NO  fills when trade.no_price  >= order.price
     """
 
     def test_buy_yes_fills_on_no_taker(self, make_dataset) -> None:
-        """Buy YES limit fills when the trade taker is NO."""
+        """Buy YES limit fills when price condition is satisfied (taker=no)."""
         td, md = make_dataset(
             "MKT-X",
             "yes",
             [
-                (50, "yes", 5),  # trade 0 — strategy places buy YES @ 0.30
-                (20, "no", 10),  # trade 1 — yes=0.20 ≤ 0.30, taker=no → FILL
+                (50, "yes", 5),  # trade 0 — strategy places buy YES @ 0.30; yes=0.50 > 0.30, no fill
+                (20, "no", 10),  # trade 1 — yes=0.20 ≤ 0.30 → FILL
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyYesOnFirstTrade(limit_price=0.30)).run()
         assert len(result.fills) == 1
 
-    def test_buy_yes_no_fill_on_yes_taker(self, make_dataset) -> None:
-        """Buy YES limit does NOT fill when the taker is also YES (both sides buying)."""
+    def test_buy_yes_fills_regardless_of_taker_side(self, make_dataset) -> None:
+        """Buy YES limit fills on price condition alone — taker side is irrelevant."""
         td, md = make_dataset(
             "MKT-X",
             "yes",
             [
-                (50, "yes", 5),  # trade 0 — strategy places buy YES @ 0.30
-                (20, "yes", 10),  # trade 1 — price ≤ limit, but taker=yes → NO fill
-                (20, "yes", 10),  # trade 2 — still wrong taker
+                (50, "yes", 5),  # trade 0 — strategy places buy YES @ 0.30; yes=0.50 > 0.30, no fill
+                (20, "yes", 10),  # trade 1 — yes=0.20 ≤ 0.30, taker=yes → FILLS (no taker filter)
+                (20, "yes", 10),  # trade 2 — order already filled
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyYesOnFirstTrade(limit_price=0.30)).run()
-        assert len(result.fills) == 0
+        assert len(result.fills) == 1
 
     def test_buy_yes_no_fill_when_price_above_limit(self, make_dataset) -> None:
         """Buy YES limit does NOT fill when the market trades above the limit price."""
@@ -161,65 +167,65 @@ class TestCLOBFillSemantics:
             "yes",
             [
                 (50, "yes", 5),  # trade 0 — strategy places buy YES @ 0.30
-                (40, "no", 10),  # trade 1 — correct taker, but yes=0.40 > 0.30 → NO fill
+                (40, "no", 10),  # trade 1 — yes=0.40 > 0.30 → NO fill
                 (35, "no", 10),  # trade 2 — yes=0.35 > 0.30 → NO fill
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyYesOnFirstTrade(limit_price=0.30)).run()
         assert len(result.fills) == 0
 
-    def test_buy_no_fills_on_yes_taker(self, make_dataset) -> None:
-        """Buy NO limit fills when the taker is YES (selling NO into the book)."""
-        # yes=75 → no=25 → no_price=0.25 in [0,1]
+    def test_buy_no_fills_on_price_condition(self, make_dataset) -> None:
+        """Buy NO limit fills when no_price <= limit, regardless of taker side."""
+        # Trade 0: yes=80, no=20; strategy places buy NO @ 0.25; no_price=0.20 ≤ 0.25 → fills immediately.
         td, md = make_dataset(
             "MKT-X",
             "no",
             [
-                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25
-                (75, "yes", 10),  # trade 1 — no=0.25 ≤ 0.25, taker=yes → FILL
+                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25; no=0.20 ≤ 0.25 → FILL
+                (75, "yes", 10),  # trade 1 — order already filled
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyNoOnFirstTrade(limit_price=0.25)).run()
         assert len(result.fills) == 1
 
-    def test_buy_no_no_fill_on_no_taker(self, make_dataset) -> None:
-        """Buy NO limit does NOT fill when the taker is NO."""
+    def test_buy_no_fills_regardless_of_taker_side(self, make_dataset) -> None:
+        """Buy NO limit fills on price condition alone — taker=no does not block the fill."""
         td, md = make_dataset(
             "MKT-X",
             "no",
             [
-                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25
-                (75, "no", 10),  # trade 1 — correct price, but taker=no → NO fill
+                (80, "no", 5),  # trade 0 — strategy places buy NO @ 0.25; no=0.20 ≤ 0.25 → FILL
+                (75, "no", 10),  # trade 1 — order already filled
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyNoOnFirstTrade(limit_price=0.25)).run()
-        assert len(result.fills) == 0
+        assert len(result.fills) == 1
 
     def test_sell_yes_fills_on_yes_taker(self, make_dataset) -> None:
-        """Sell YES limit fills when the taker is YES (buying YES, lifting the ask)."""
+        """Sell YES limit fills when yes_price >= limit."""
         td, md = make_dataset(
             "MKT-X",
             "yes",
             [
-                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30
-                (35, "yes", 10),  # trade 1 — yes=0.35 ≥ 0.30, taker=yes → FILL
+                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30; yes=0.25 < 0.30, no fill
+                (35, "yes", 10),  # trade 1 — yes=0.35 ≥ 0.30 → FILL
             ],
         )
         result = _engine(KalshiFeed(td, md), _SellYesOnFirstTrade(limit_price=0.30)).run()
         assert len(result.fills) == 1
 
-    def test_sell_yes_no_fill_on_no_taker(self, make_dataset) -> None:
-        """Sell YES limit does NOT fill when the taker is NO."""
+    def test_sell_yes_fills_regardless_of_taker_side(self, make_dataset) -> None:
+        """Sell YES limit fills on price condition alone — taker=no does not block the fill."""
         td, md = make_dataset(
             "MKT-X",
             "yes",
             [
-                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30
-                (35, "no", 10),  # trade 1 — correct price, but taker=no → NO fill
+                (25, "no", 5),  # trade 0 — strategy places sell YES @ 0.30; yes=0.25 < 0.30, no fill
+                (35, "no", 10),  # trade 1 — yes=0.35 ≥ 0.30, taker=no → FILLS (no taker filter)
             ],
         )
         result = _engine(KalshiFeed(td, md), _SellYesOnFirstTrade(limit_price=0.30)).run()
-        assert len(result.fills) == 0
+        assert len(result.fills) == 1
 
     def test_fill_price_equals_trade_price_not_limit(self, make_dataset) -> None:
         """Orders fill at the trade's market price, not the order's limit price.
@@ -258,7 +264,7 @@ class TestCLOBFillSemantics:
             [
                 (50, "yes", 5),  # trade 0 — places order #1
                 (50, "yes", 5),  # trade 1 — places order #2 (order #1 doesn't fill: yes > limit)
-                (30, "no", 100),  # trade 2 — yes=0.30 ≤ 0.40, taker=no → fills both
+                (30, "no", 100),  # trade 2 — yes=0.30 ≤ 0.40 → fills both
             ],
         )
         result = _engine(KalshiFeed(td, md), TwoOrderStrategy()).run()
@@ -310,14 +316,15 @@ class TestResolutionPnL:
         assert result.final_equity == pytest.approx(998.0)  # 1000 - 2.00 + 0.00
 
     def test_long_no_wins_on_no_resolution(self, make_dataset) -> None:
-        """Buy NO fills at 0.25, market resolves NO → final_equity = 1000 - 2.50 + 10.00."""
-        # yes=75 → no=25, no_price=0.25 in [0,1]; taker=yes triggers NO fill
+        """Buy NO fills at trade price 0.25, market resolves NO → final_equity = 1000 - 2.50 + 10.00."""
+        # Trade 0: yes=70, no=30; no_price=0.30 > limit 0.25 → no immediate fill.
+        # Trade 1: yes=75, no=25; no_price=0.25 ≤ 0.25 → fills at trade price 0.25.
         td, md = make_dataset(
             "MKT-X",
             "no",
             [
-                (80, "no", 5),  # trade 0 — places buy NO @ 0.25
-                (75, "yes", 10),  # trade 1 — no=0.25 ≤ 0.25, taker=yes → fills at 0.25
+                (70, "no", 5),  # trade 0 — places buy NO @ 0.25; no=0.30 > 0.25, no fill
+                (75, "yes", 10),  # trade 1 — no=0.25 ≤ 0.25 → fills at trade price 0.25
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyNoOnFirstTrade(limit_price=0.25, quantity=10.0)).run()
@@ -326,13 +333,13 @@ class TestResolutionPnL:
         assert result.final_equity == pytest.approx(1007.5)  # 1000 - 2.50 + 10.00
 
     def test_long_no_loses_on_yes_resolution(self, make_dataset) -> None:
-        """Buy NO fills at 0.25, market resolves YES → final_equity = 1000 - 2.50."""
+        """Buy NO fills at trade price 0.25, market resolves YES → final_equity = 1000 - 2.50."""
         td, md = make_dataset(
             "MKT-X",
             "yes",  # resolves YES — NO holder gets nothing
             [
-                (80, "no", 5),
-                (75, "yes", 10),
+                (70, "no", 5),  # trade 0 — places buy NO @ 0.25; no=0.30 > 0.25, no fill
+                (75, "yes", 10),  # trade 1 — no=0.25 ≤ 0.25 → fills at trade price 0.25
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyNoOnFirstTrade(limit_price=0.25, quantity=10.0)).run()
@@ -346,7 +353,7 @@ class TestResolutionPnL:
             "yes",
             [
                 (50, "yes", 5),  # trade 0 — places buy YES @ 0.20 (limit below market)
-                (50, "yes", 10),  # trade 1 — taker=yes, wrong side → no fill
+                (50, "yes", 10),  # trade 1 — yes=0.50 > limit 0.20 → no fill
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyYesOnFirstTrade(limit_price=0.20)).run()
@@ -369,7 +376,7 @@ class TestCashAccounting:
             "yes",
             [
                 (50, "yes", 5),
-                (30, "no", 10),  # fills at 0.30 with taker=no
+                (30, "no", 10),  # yes=0.30 ≤ limit 0.40 → fill
             ],
         )
         feed_a = KalshiFeed(td, md)
@@ -389,7 +396,7 @@ class TestCashAccounting:
         assert with_fee.final_equity < no_fee.final_equity
 
     def test_commission_equals_rate_times_fill_cost(self, make_dataset) -> None:
-        """commission = commission_rate × fill_price × fill_quantity (to within fp precision)."""
+        """commission = commission_rate × P × (1 − P) × qty  (Kalshi fee formula)."""
         td, md = make_dataset(
             "MKT-X",
             "yes",
@@ -398,7 +405,7 @@ class TestCashAccounting:
                 (30, "no", 10),
             ],
         )
-        rate = 0.02
+        rate = 0.07
         feed = KalshiFeed(td, md)
         result = Engine(
             feed=feed,
@@ -409,7 +416,7 @@ class TestCashAccounting:
         ).run()
         assert len(result.fills) == 1
         f = result.fills[0]
-        expected_commission = rate * f.price * f.quantity
+        expected_commission = rate * f.price * (1 - f.price) * f.quantity
         assert f.commission == pytest.approx(expected_commission, rel=1e-6)
 
     def test_no_leverage_fill_capped_by_cash(self, make_dataset) -> None:
@@ -430,7 +437,7 @@ class TestCashAccounting:
             "yes",
             [
                 (60, "yes", 5),  # trade 0 — places oversized order
-                (50, "no", 1000),  # trade 1 — large liquidity, taker=no → partial fill
+                (50, "no", 1000),  # trade 1 — yes=0.50 ≤ limit 0.50, large liquidity → partial fill
             ],
         )
         result = Engine(
@@ -452,7 +459,14 @@ class TestCashAccounting:
 
 
 class TestSlippage:
-    """Market-impact model worsens fill prices relative to the raw trade price."""
+    """Slippage parameter behaviour for resting limit (maker) fills.
+
+    The engine's `apply_market_impact` function exists for potential future
+    aggressive / market-order strategies but is NOT applied to resting limit
+    orders.  Resting limit orders always fill at the trade price — the only
+    transaction cost is the exchange commission.  Passing slippage > 0 to the
+    Engine constructor therefore has no effect on maker fill prices.
+    """
 
     def test_zero_slippage_fill_price_equals_trade_price(self, make_dataset) -> None:
         """With slippage=0, fill price equals the market trade price (no impact added)."""
@@ -461,15 +475,15 @@ class TestSlippage:
             "yes",
             [
                 (50, "yes", 5),
-                (30, "no", 10),  # trade at yes=0.30; with slippage=0 fill price = trade price 0.30
+                (30, "no", 10),  # trade at yes=0.30; fill price = trade price 0.30
             ],
         )
         result = _engine(KalshiFeed(td, md), _BuyYesOnFirstTrade(limit_price=0.40), slippage=0.0).run()
         assert len(result.fills) == 1
         assert result.fills[0].price == pytest.approx(0.30)
 
-    def test_nonzero_slippage_raises_buy_fill_price(self, make_dataset) -> None:
-        """With slippage > 0, buy fill price is worse (higher) than with slippage=0."""
+    def test_nonzero_slippage_has_no_effect_on_maker_fills(self, make_dataset) -> None:
+        """Slippage is not applied to resting limit orders — fill price equals trade price."""
         td, md = make_dataset(
             "MKT-X",
             "yes",
@@ -492,40 +506,17 @@ class TestSlippage:
 
         assert len(no_slip.fills) == 1
         assert len(with_slip.fills) == 1
-        # Slippage is applied on top of the order price → worse fill for buyer
-        assert with_slip.fills[0].price > no_slip.fills[0].price
+        # Resting limit orders fill at trade price regardless of the slippage setting.
+        assert with_slip.fills[0].price == pytest.approx(no_slip.fills[0].price)
 
-    def test_slippage_grows_near_extreme_prices(self, make_dataset) -> None:
-        """Market impact is larger near 5% odds than near 50% (spread widens at extremes).
-
-        Slippage is measured as the extra cost above the trade price:
-            impact = fill_price(with_slippage) - fill_price(no_slippage)
-        Both orders see the same trade price; the extreme-price order pays more impact.
-        """
+    def test_slippage_setting_does_not_affect_fill_price_at_any_odds(self, make_dataset) -> None:
+        """Slippage has no effect near 50% or near 5% — maker fills always equal trade price."""
         slippage = 0.005
 
-        # Near 50%: trade at 0.45, order limit=0.50, slippage amplifier ≈ 1×
-        td_mid, md_mid = make_dataset(
-            "MKT-MID",
-            "yes",
-            [(60, "yes", 5), (45, "no", 10)],
-        )
-        td_mid_0, md_mid_0 = make_dataset(
-            "MKT-MID-0",
-            "yes",
-            [(60, "yes", 5), (45, "no", 10)],
-        )
-        # Near 5%: trade at 0.04, order limit=0.05, slippage amplifier ≈ 6.5×
-        td_ext, md_ext = make_dataset(
-            "MKT-EXT",
-            "yes",
-            [(10, "yes", 5), (4, "no", 10)],
-        )
-        td_ext_0, md_ext_0 = make_dataset(
-            "MKT-EXT-0",
-            "yes",
-            [(10, "yes", 5), (4, "no", 10)],
-        )
+        td_mid, md_mid = make_dataset("MKT-MID", "yes", [(60, "yes", 5), (45, "no", 10)])
+        td_mid_0, md_mid_0 = make_dataset("MKT-MID-0", "yes", [(60, "yes", 5), (45, "no", 10)])
+        td_ext, md_ext = make_dataset("MKT-EXT", "yes", [(10, "yes", 5), (4, "no", 10)])
+        td_ext_0, md_ext_0 = make_dataset("MKT-EXT-0", "yes", [(10, "yes", 5), (4, "no", 10)])
 
         res_mid = Engine(
             feed=KalshiFeed(td_mid, md_mid),
@@ -559,12 +550,9 @@ class TestSlippage:
         assert len(res_mid.fills) == 1
         assert len(res_ext.fills) == 1
 
-        # Impact = extra cost above the zero-slippage fill price
-        impact_mid = res_mid.fills[0].price - res_mid_0.fills[0].price
-        impact_ext = res_ext.fills[0].price - res_ext_0.fills[0].price
-        assert impact_ext > impact_mid, (
-            f"Expected extreme-price impact ({impact_ext:.4f}) > mid-price impact ({impact_mid:.4f})"
-        )
+        # Slippage has no effect on maker fills at any price level.
+        assert res_mid.fills[0].price == pytest.approx(res_mid_0.fills[0].price)
+        assert res_ext.fills[0].price == pytest.approx(res_ext_0.fills[0].price)
 
 
 # ---------------------------------------------------------------------------

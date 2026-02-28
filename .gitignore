@@ -36,3 +36,4 @@ crates/*/uv.lock
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+/prediction-market-analysis/.claude/

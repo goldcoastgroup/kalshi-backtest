@@ -7,8 +7,7 @@ import pandas as pd
 
 
 def _parquet_path(output_dir: str, event_ticker: str, T: float) -> Path:
-    T_str = f"{T:.4f}".rstrip("0").rstrip(".")
-    return Path(output_dir) / f"{event_ticker}_T{T_str}.parquet"
+    return Path(output_dir) / f"{event_ticker}.parquet"
 
 
 def save_timeseries(df: pd.DataFrame, output_dir: str, event_ticker: str, T: float) -> Path:

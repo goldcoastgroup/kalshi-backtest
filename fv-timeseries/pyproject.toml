@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fv-timeseries"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "pymongo",
+    "python-dotenv",
+    "scikit-learn",
+    "scipy",
+    # xgboost, xgboostlss, and torch are NOT declared here because they have
+    # stale/conflicting dependency constraints that break `uv pip install`.
+    # Install them manually after `uv pip install -e .`:
+    #
+    #   VIRTUAL_ENV=/path/to/fv-timeseries/.venv uv pip install xgboost==3.0.5
+    #   VIRTUAL_ENV=/path/to/fv-timeseries/.venv uv pip install --no-deps xgboostlss==0.6.1
+    #   VIRTUAL_ENV=/path/to/fv-timeseries/.venv uv pip install torch==2.7.1
+    #   VIRTUAL_ENV=/path/to/fv-timeseries/.venv uv pip install tqdm pyro-ppl opt_einsum
+    #
+    # NOTE: When running uv commands from inside kalshi-backtest/, the parent
+    # project's .venv is auto-detected. Prefix with VIRTUAL_ENV=.venv or
+    # run `uv venv --python 3.13 --clear && VIRTUAL_ENV=.venv uv pip install -e .`
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["fv_timeseries"]

@@ -1,4 +1,4 @@
-.PHONY: backtest fronttest lint format test setup build-rust
+.PHONY: backtest fronttest lint format test setup build-rust initrt
 
 ANALYSIS = VIRTUAL_ENV= $(MAKE) -C prediction-market-analysis
 RUN = uv run main.py
@@ -26,6 +26,9 @@ build-rust:
 setup:
 	git submodule update --init --recursive
 	$(ANALYSIS) setup
+
+initrt:
+	cd fv-timeseries && uv run python scripts/initrt.py
 
 %:
 	$(ANALYSIS) $@ $(filter-out $@,$(MAKECMDGOALS))

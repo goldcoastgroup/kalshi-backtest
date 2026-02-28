@@ -265,6 +265,11 @@ def generate_timeseries(
         cur_score_val = float(expit(cur_score_logit_val))
         total_reviews_val = int(base_row["total_reviews"])
 
+        # Only generate rows once the model's training constraints are met:
+        # at least 50 reviews and a non-perfect score.
+        if total_reviews_val < 50 or cur_score_val >= 1.0:
+            continue
+
         # Build feature matrix: copy base row, override time features per minute
         X_dict = {col: np.full(n_min, float(base_row[col])) for col in train_cols}
 

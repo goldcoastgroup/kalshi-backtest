@@ -28,6 +28,7 @@ def _snake_to_title(s: str) -> str:
 def backtest(name: str | None = None, use_rust: bool = True):
     """Run a backtesting strategy by name or show interactive menu."""
     from src.backtesting.feeds.kalshi import KalshiFeed
+    from src.backtesting.feeds.kalshi_rt import KalshiRTFeed
     from src.backtesting.feeds.polymarket import PolymarketFeed
 
     strategies = Strategy.load()
@@ -37,6 +38,7 @@ def backtest(name: str | None = None, use_rust: bool = True):
 
     platforms = {
         "kalshi": ("Kalshi", lambda: KalshiFeed()),
+        "kalshi_rt": ("Kalshi RT", lambda: KalshiRTFeed()),
         "polymarket": ("Polymarket", lambda: PolymarketFeed()),
     }
 
@@ -106,30 +108,33 @@ def _run_backtest_interactive(strategy, platforms: dict, use_rust: bool = True):
     _, feed_factory = platforms[platform_key]
     feed = feed_factory()
 
-    sample_options = [
-        "Top 1% by volume (recommended — captures most trading activity)",
-        "Top 5% by volume",
-        "Top 10% by volume",
-        "Top 20% by volume",
-        "Top 50% by volume",
-        "100% — all markets (not recommended — very slow, mostly illiquid)",
-    ]
-    sample_menu = TerminalMenu(
-        sample_options,
-        title=(
-            "Market selection (by trading volume):\n"
-            "  A small fraction of markets account for the vast majority of\n"
-            "  trading volume on prediction market platforms. Filtering to\n"
-            "  the top percentile gives you the most realistic backtest."
-        ),
-        cycle_cursor=True,
-        clear_screen=False,
-    )
-    sample_choice = cast("int | None", sample_menu.show())
-    sample_map: dict[int, float | None] = {0: 0.01, 1: 0.05, 2: 0.1, 3: 0.2, 4: 0.5, 5: None}
-    market_sample = sample_map.get(sample_choice) if sample_choice is not None else 0.01
-
-    sample_label = sample_options[sample_choice].split(" (")[0] if sample_choice is not None else "Top 1%"
+    if platform_key == "kalshi_rt":
+        market_sample = None
+        sample_label = "100% (all RT markets)"
+    else:
+        sample_options = [
+            "Top 1% by volume (recommended — captures most trading activity)",
+            "Top 5% by volume",
+            "Top 10% by volume",
+            "Top 20% by volume",
+            "Top 50% by volume",
+            "100% — all markets (not recommended — very slow, mostly illiquid)",
+        ]
+        sample_menu = TerminalMenu(
+            sample_options,
+            title=(
+                "Market selection (by trading volume):\n"
+                "  A small fraction of markets account for the vast majority of\n"
+                "  trading volume on prediction market platforms. Filtering to\n"
+                "  the top percentile gives you the most realistic backtest."
+            ),
+            cycle_cursor=True,
+            clear_screen=False,
+        )
+        sample_choice = cast("int | None", sample_menu.show())
+        sample_map: dict[int, float | None] = {0: 0.01, 1: 0.05, 2: 0.1, 3: 0.2, 4: 0.5, 5: None}
+        market_sample = sample_map.get(sample_choice) if sample_choice is not None else 0.01
+        sample_label = sample_options[sample_choice].split(" (")[0] if sample_choice is not None else "Top 1%"
 
     print(f"\n{_ts()}  Running backtest: {strategy.name} on {platform_key}")
     print(f"{_ts()}  Strategy:         {strategy.description}")

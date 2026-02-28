@@ -49,7 +49,9 @@ def main() -> None:
         event_ticker = event["_id"]
         ems_id = event["ems_id"]
         title = event.get("title", "")
-        strikes = sorted(int(m["strike"]) for m in event.get("markets", []))
+        markets_list = event.get("markets", [])
+        strikes = sorted(int(m["strike"]) for m in markets_list)
+        strike_to_ticker = {int(m["strike"]): m["ticker"] for m in markets_list}
 
         if not overwrite and _parquet_path("data/", event_ticker, T).exists():
             print(f"[{i}/{total}] {event_ticker} — {title} ... skipped (exists)")
@@ -63,6 +65,7 @@ def main() -> None:
                 event_ticker=event_ticker,
                 start_delta_hours=168.0,
                 strikes=strikes,
+                strike_to_ticker=strike_to_ticker,
                 T=T,
                 theta_delta_hours=theta_delta_hours,
                 output_dir="data/",

@@ -20,6 +20,16 @@ Gamma stress-testing (when gamma_stress > 0):
   The stressed fv must still clear min_edge against the market price.
   Set gamma_stress=0.0 to disable and revert to plain fv_T behaviour.
 
+Per-event notional cap (max_event_fraction):
+  Multiple strike markets for the same film (e.g. KXRTMICKEY17-82 and
+  KXRTMICKEY17-85) are correlated — if the model is wrong about the score
+  all strikes lose together.  Total notional committed across all active
+  positions for one event is capped at max_event_fraction × initial_cash.
+
+  The event ticker is derived as market_id.rsplit('-', 1)[0], so
+  KXRTMICKEY17-82 and KXRTMICKEY17-85 share event KXRTMICKEY17.
+  Set max_event_fraction=1.0 to disable.
+
 Leverage controls:
   1. One pending order per market (skip if already pending).
   2. One open position per market until resolution (skip if already have a
@@ -27,6 +37,7 @@ Leverage controls:
   3. Position sized against FREE cash = portfolio.cash − committed notional
      of all outstanding unfilled orders.
   4. Per-bet Kelly fraction and hard cap applied to free cash.
+  5. Per-event notional cap applied on top of Kelly sizing.
 """
 
 from __future__ import annotations
@@ -54,6 +65,7 @@ class FVKellyStrategy(Strategy):
         max_position_fraction: float = 0.25,
         min_edge: float = 0.17,
         gamma_stress: float = 1.2,
+        max_event_fraction: float = 0.20,
         initial_cash: float = 10_000.0,
     ):
         super().__init__(
@@ -61,7 +73,8 @@ class FVKellyStrategy(Strategy):
             description=(
                 f"Kelly bets on FV mispricing, one position per market "
                 f"(kelly={kelly_fraction}, cap={max_position_fraction:.0%}, "
-                f"min_edge={min_edge:.0%}, gamma_stress={gamma_stress})."
+                f"min_edge={min_edge:.0%}, gamma_stress={gamma_stress}, "
+                f"event_cap={max_event_fraction:.0%})."
             ),
             initial_cash=initial_cash,
         )
@@ -70,6 +83,8 @@ class FVKellyStrategy(Strategy):
         self.max_position_fraction = max_position_fraction
         self.min_edge = min_edge
         self.gamma_stress = gamma_stress
+        self.max_event_fraction = max_event_fraction
+        self._initial_cash = initial_cash
 
         # ticker → {minute → (fv_T, gamma_pos, gamma_neg)}
         self._fv_lookup: dict[str, dict[pd.Timestamp, tuple[float, float, float]]] = {}
@@ -78,8 +93,19 @@ class FVKellyStrategy(Strategy):
         self._market_committed: dict[str, float] = {}
         # markets with an open position (pending or filled, until resolution)
         self._active_markets: set[str] = set()
+        # event_ticker → total FILLED notional at risk across all active strikes.
+        # Incremented at fill time (not submission) to avoid over-counting partial fills
+        # on low-price bets where submitted qty >> filled qty.
+        self._event_notional: dict[str, float] = {}
+        # market_id → filled notional (set at fill time, popped at resolve for cleanup)
+        self._market_notional: dict[str, float] = {}
         # market_id → fv_T at the moment the bet was placed (for calibration reporting)
         self.fv_at_fill: dict[str, float] = {}
+
+    @staticmethod
+    def _event_ticker(market_id: str) -> str:
+        """Strip the strike suffix: 'KXRTMICKEY17-82' → 'KXRTMICKEY17'."""
+        return market_id.rsplit("-", 1)[0]
 
     @property
     def _committed(self) -> float:
@@ -135,7 +161,15 @@ class FVKellyStrategy(Strategy):
         # gamma_pos ≥ 0 (fresh review hurts a NO bet by pushing fv up).
         no_fv_stressed = (1.0 - fv) - g_pos * self.gamma_stress
 
+        # Per-event notional cap: how much budget remains for this event?
+        # Reference is initial_cash so the cap stays stable as capital is deployed.
+        event = self._event_ticker(market_id)
+        event_cap = self.max_event_fraction * self._initial_cash
+        event_remaining = max(0.0, event_cap - self._event_notional.get(event, 0.0))
+
         if p_yes < fv and (fv_yes_stressed - p_yes) >= self.min_edge:
+            if event_remaining <= 0:
+                return  # event budget exhausted
             # Kelly sizing on raw fv (unstressed); gate on stressed fv
             edge = fv - p_yes
             f = min(self.kelly_fraction * edge / (1.0 - p_yes), self.max_position_fraction)
@@ -146,6 +180,8 @@ class FVKellyStrategy(Strategy):
             self.fv_at_fill[market_id] = fv
 
         elif p_no < (1.0 - fv) and (no_fv_stressed - p_no) >= self.min_edge:
+            if event_remaining <= 0:
+                return  # event budget exhausted
             # Kelly sizing on raw no_fv; gate on stressed no_fv
             no_fv = 1.0 - fv
             edge = no_fv - p_no
@@ -157,16 +193,33 @@ class FVKellyStrategy(Strategy):
             self.fv_at_fill[market_id] = fv
 
     def on_fill(self, fill: Fill) -> None:
-        # Order filled — release committed cash; position stays active until resolution
+        # Order filled — release committed cash; record actual filled notional for event cap.
+        # We track filled qty × price (not submitted) to avoid over-counting partial fills
+        # on low-price bets where submitted qty >> filled qty.
         self._market_committed.pop(fill.market_id, None)
+        event = self._event_ticker(fill.market_id)
+        filled_notional = fill.price * fill.quantity
+        self._event_notional[event] = self._event_notional.get(event, 0.0) + filled_notional
+        self._market_notional[fill.market_id] = (
+            self._market_notional.get(fill.market_id, 0.0) + filled_notional
+        )
 
     def on_market_resolve(self, market: MarketInfo, result: Side) -> None:
         # Position resolved — market is free to bet again if re-opened (never happens for KXRT)
-        self._active_markets.discard(market.market_id)
+        if market.market_id in self._active_markets:
+            self._active_markets.discard(market.market_id)
+            event = self._event_ticker(market.market_id)
+            notional = self._market_notional.pop(market.market_id, 0.0)
+            remaining = self._event_notional.get(event, 0.0) - notional
+            if remaining <= 0.0:
+                self._event_notional.pop(event, None)
+            else:
+                self._event_notional[event] = remaining
         self._market_committed.pop(market.market_id, None)
 
     def on_market_close(self, market: MarketInfo) -> None:
-        # Cancel unfilled order and release its committed slot
+        # Cancel unfilled order and release its committed slot.
+        # _event_notional only contains filled notional so no adjustment needed here.
         self.cancel_all(market.market_id)
         self._market_committed.pop(market.market_id, None)
         # Keep in _active_markets if filled (position still open until resolve)

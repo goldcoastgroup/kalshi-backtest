@@ -75,6 +75,55 @@ def _make_kalshi_markets() -> pd.DataFrame:
     )
 
 
+def _make_kxrt_trades() -> pd.DataFrame:
+    """Build KXRT trades spread across 0–119 hours before a fixed close_time (240 rows)."""
+    close_time = pd.Timestamp("2024-06-10 12:00:00", tz="UTC")
+    tickers = ["KXRTMOVIETEST-45", "KXRTMOVIETEST-60"]
+    rows = []
+    trade_id = 0
+    for ticker in tickers:
+        for hours_offset in range(1, 121):  # 1h–120h before close → hours_to_close 0–119
+            trade_id += 1
+            rows.append(
+                {
+                    "trade_id": str(trade_id),
+                    "ticker": ticker,
+                    "count": 10,
+                    "yes_price": 50,
+                    "no_price": 50,
+                    "taker_side": "yes" if trade_id % 2 == 0 else "no",
+                    "created_time": close_time - pd.Timedelta(hours=hours_offset),
+                    "_fetched_at": close_time,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _make_kxrt_markets() -> pd.DataFrame:
+    """Build KXRT markets with close_time (2 rows)."""
+    close_time = pd.Timestamp("2024-06-10 12:00:00", tz="UTC")
+    return pd.DataFrame(
+        [
+            {
+                "ticker": "KXRTMOVIETEST-45",
+                "event_ticker": "KXRTMOVIETEST",
+                "status": "finalized",
+                "result": "yes",
+                "volume": 1000,
+                "close_time": close_time,
+            },
+            {
+                "ticker": "KXRTMOVIETEST-60",
+                "event_ticker": "KXRTMOVIETEST",
+                "status": "finalized",
+                "result": "no",
+                "volume": 800,
+                "close_time": close_time,
+            },
+        ]
+    )
+
+
 def _make_polymarket_ctf_trades() -> pd.DataFrame:
     """Build minimal Polymarket CTF trades DataFrame (~10 rows).
 
@@ -203,6 +252,20 @@ def kalshi_markets_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def kxrt_trades_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    d = tmp_path_factory.mktemp("kxrt_trades")
+    _make_kxrt_trades().to_parquet(d / "trades.parquet")
+    return d
+
+
+@pytest.fixture(scope="session")
+def kxrt_markets_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    d = tmp_path_factory.mktemp("kxrt_markets")
+    _make_kxrt_markets().to_parquet(d / "markets.parquet")
+    return d
+
+
+@pytest.fixture(scope="session")
 def polymarket_trades_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     d = tmp_path_factory.mktemp("polymarket_trades")
     _make_polymarket_ctf_trades().to_parquet(d / "trades.parquet")
@@ -250,6 +313,8 @@ def collateral_lookup_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def all_fixture_dirs(
     kalshi_trades_dir: Path,
     kalshi_markets_dir: Path,
+    kxrt_trades_dir: Path,
+    kxrt_markets_dir: Path,
     polymarket_trades_dir: Path,
     polymarket_legacy_trades_dir: Path,
     polymarket_markets_dir: Path,
@@ -260,6 +325,8 @@ def all_fixture_dirs(
     return {
         "kalshi_trades_dir": kalshi_trades_dir,
         "kalshi_markets_dir": kalshi_markets_dir,
+        "kxrt_trades_dir": kxrt_trades_dir,
+        "kxrt_markets_dir": kxrt_markets_dir,
         "polymarket_trades_dir": polymarket_trades_dir,
         "polymarket_legacy_trades_dir": polymarket_legacy_trades_dir,
         "polymarket_markets_dir": polymarket_markets_dir,

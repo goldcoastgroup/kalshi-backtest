@@ -25,6 +25,7 @@ def _build_kwargs(cls: type[Analysis], fixture_dirs: dict[str, Path]) -> dict[st
     params = [p for p in sig.parameters if p != "self"]
 
     module = cls.__module__
+    is_kxrt = "kxrt" in cls.__name__.lower()
     is_kalshi = ".kalshi." in module
     is_polymarket = ".polymarket." in module
 
@@ -33,6 +34,10 @@ def _build_kwargs(cls: type[Analysis], fixture_dirs: dict[str, Path]) -> dict[st
         # Direct match — comparison module params use explicit platform prefixes
         if param in fixture_dirs:
             kwargs[param] = fixture_dirs[param]
+        elif is_kxrt and param == "trades_dir":
+            kwargs[param] = fixture_dirs["kxrt_trades_dir"]
+        elif is_kxrt and param == "markets_dir":
+            kwargs[param] = fixture_dirs["kxrt_markets_dir"]
         elif is_kalshi and param == "trades_dir":
             kwargs[param] = fixture_dirs["kalshi_trades_dir"]
         elif is_kalshi and param == "markets_dir":

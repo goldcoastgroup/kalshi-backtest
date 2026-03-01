@@ -180,10 +180,31 @@ def _run_backtest_interactive(strategy, platforms: dict, use_rust: bool = True):
 
     print(f"{_ts()}  {BOLD}Trading:{RESET}")
     wr_color = GREEN if win_rate >= 0.5 else RED
-    print(f"{_ts()}    Win rate:       {wr_color}{win_rate:.2%}{RESET}")
+    implied = m.get("avg_implied_prob", 0)
+    edge_vs_implied = m.get("win_rate_vs_implied", 0)
+    edge_color = GREEN if edge_vs_implied > 0 else RED
+    print(f"{_ts()}    Win rate:       {wr_color}{win_rate:.2%}{RESET}  (implied {implied:.2%}, edge {edge_color}{edge_vs_implied:+.2%}{RESET})")
     print(f"{_ts()}    Profit factor:  {GREEN if pf >= 1 else RED}{pf:.3f}{RESET}")
     print(f"{_ts()}    Avg trade P&L:  {_pn(avg_pnl, '${:.4f}')}")
     print(f"{_ts()}    Commission:     ${commission:.2f}\n")
+
+    if hasattr(strategy, "fv_at_fill") and strategy.fv_at_fill:
+        from src.backtesting.metrics import model_calibration_report
+        cal = model_calibration_report(result.fills, result.market_pnls, strategy.fv_at_fill)
+        if cal:
+            overall_winner = "MODEL" if cal["model_better"] else "market"
+            overall_color  = GREEN if cal["model_better"] else RED
+            print(f"{_ts()}  {BOLD}Model vs Market Calibration ({cal['n']} fills):{RESET}")
+            print(f"{_ts()}    Overall MAE:  model={cal['model_mae']:.3f}  market={cal['market_mae']:.3f}  "
+                  f"→ {overall_color}{overall_winner}{RESET}")
+            for bucket, d in cal["by_price"].items():
+                w = "MODEL" if d["model_better"] else "market"
+                w_color = GREEN if d["model_better"] else RED
+                print(f"{_ts()}    {bucket:>9}:  "
+                      f"model={d['model_err']:+.3f} (mae={d['model_mae']:.3f})  "
+                      f"market={d['market_err']:+.3f} (mae={d['market_mae']:.3f})  "
+                      f"→ {w_color}{w}{RESET}  n={d['n']}")
+            print()
 
     if result.event_log:
         output_dir = Path("output")

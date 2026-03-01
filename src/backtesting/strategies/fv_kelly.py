@@ -9,6 +9,17 @@ from fair value, places a Kelly-sized limit order:
 
 The two conditions are mutually exclusive.
 
+Gamma stress-testing (when gamma_stress > 0):
+  Before entering, the fair value is stressed by one review's worth of adverse
+  gamma to ask "does this trade still have edge if the next review goes against
+  me?"
+
+  YES bet: fv_stressed = fv_T + gamma_neg * gamma_stress  (gamma_neg ≤ 0)
+  NO  bet: no_fv_stressed = (1-fv_T) - gamma_pos * gamma_stress  (gamma_pos ≥ 0)
+
+  The stressed fv must still clear min_edge against the market price.
+  Set gamma_stress=0.0 to disable and revert to plain fv_T behaviour.
+
 Leverage controls:
   1. One pending order per market (skip if already pending).
   2. One open position per market until resolution (skip if already have a
@@ -42,6 +53,7 @@ class FVKellyStrategy(Strategy):
         kelly_fraction: float = 0.5,
         max_position_fraction: float = 0.25,
         min_edge: float = 0.17,
+        gamma_stress: float = 1.2,
         initial_cash: float = 10_000.0,
     ):
         super().__init__(
@@ -49,7 +61,7 @@ class FVKellyStrategy(Strategy):
             description=(
                 f"Kelly bets on FV mispricing, one position per market "
                 f"(kelly={kelly_fraction}, cap={max_position_fraction:.0%}, "
-                f"min_edge={min_edge:.0%})."
+                f"min_edge={min_edge:.0%}, gamma_stress={gamma_stress})."
             ),
             initial_cash=initial_cash,
         )
@@ -57,13 +69,17 @@ class FVKellyStrategy(Strategy):
         self.kelly_fraction = kelly_fraction
         self.max_position_fraction = max_position_fraction
         self.min_edge = min_edge
+        self.gamma_stress = gamma_stress
 
-        self._fv_lookup: dict[str, dict[pd.Timestamp, float]] = {}
+        # ticker → {minute → (fv_T, gamma_pos, gamma_neg)}
+        self._fv_lookup: dict[str, dict[pd.Timestamp, tuple[float, float, float]]] = {}
 
         # market_id → committed notional for its one pending order
         self._market_committed: dict[str, float] = {}
         # markets with an open position (pending or filled, until resolution)
         self._active_markets: set[str] = set()
+        # market_id → fv_T at the moment the bet was placed (for calibration reporting)
+        self.fv_at_fill: dict[str, float] = {}
 
     @property
     def _committed(self) -> float:
@@ -76,11 +92,13 @@ class FVKellyStrategy(Strategy):
             return
 
         for path in parquets:
-            df = pd.read_parquet(path, columns=["timestamp", "ticker", "fv_T"])
+            df = pd.read_parquet(path, columns=["timestamp", "ticker", "fv_T", "gamma_pos", "gamma_neg"])
             df = df[df["ticker"].str.len() > 0]
             df["minute"] = df["timestamp"].dt.floor("min")
             for ticker, grp in df.groupby("ticker"):
-                self._fv_lookup[ticker] = dict(zip(grp["minute"], grp["fv_T"]))
+                self._fv_lookup[ticker] = dict(
+                    zip(grp["minute"], zip(grp["fv_T"], grp["gamma_pos"], grp["gamma_neg"]))
+                )
 
         print(f"[fv_kelly] Loaded FV data for {len(self._fv_lookup)} markets.")
 
@@ -98,9 +116,11 @@ class FVKellyStrategy(Strategy):
             ts = ts.tz_convert("UTC")
         minute = ts.floor("min")
 
-        fv = self._fv_lookup[market_id].get(minute)
-        if fv is None:
+        entry = self._fv_lookup[market_id].get(minute)
+        if entry is None:
             return
+
+        fv, g_pos, g_neg = entry
 
         p_yes = trade.yes_price
         p_no = trade.no_price
@@ -109,15 +129,24 @@ class FVKellyStrategy(Strategy):
         if free_cash <= 0:
             return
 
-        if p_yes < fv and (fv - p_yes) >= self.min_edge:
+        # Apply gamma stress: shift fv by one adverse review before checking edge.
+        # gamma_neg ≤ 0 (fresh→rotten review hurts a YES bet).
+        fv_yes_stressed = fv + g_neg * self.gamma_stress
+        # gamma_pos ≥ 0 (fresh review hurts a NO bet by pushing fv up).
+        no_fv_stressed = (1.0 - fv) - g_pos * self.gamma_stress
+
+        if p_yes < fv and (fv_yes_stressed - p_yes) >= self.min_edge:
+            # Kelly sizing on raw fv (unstressed); gate on stressed fv
             edge = fv - p_yes
             f = min(self.kelly_fraction * edge / (1.0 - p_yes), self.max_position_fraction)
             qty = max(1, int(f * free_cash / p_yes))
             self.buy_yes(market_id, price=p_yes, quantity=qty)
             self._market_committed[market_id] = qty * p_yes
             self._active_markets.add(market_id)
+            self.fv_at_fill[market_id] = fv
 
-        elif p_no < (1.0 - fv) and ((1.0 - fv) - p_no) >= self.min_edge:
+        elif p_no < (1.0 - fv) and (no_fv_stressed - p_no) >= self.min_edge:
+            # Kelly sizing on raw no_fv; gate on stressed no_fv
             no_fv = 1.0 - fv
             edge = no_fv - p_no
             f = min(self.kelly_fraction * edge / (1.0 - p_no), self.max_position_fraction)
@@ -125,6 +154,7 @@ class FVKellyStrategy(Strategy):
             self.buy_no(market_id, price=p_no, quantity=qty)
             self._market_committed[market_id] = qty * p_no
             self._active_markets.add(market_id)
+            self.fv_at_fill[market_id] = fv
 
     def on_fill(self, fill: Fill) -> None:
         # Order filled — release committed cash; position stays active until resolution

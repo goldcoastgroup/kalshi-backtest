@@ -39,7 +39,10 @@ class KxrtTradePriceImpactRtAnalysis(Analysis):
                     SELECT
                         (hours_to_close / 6) * 6 AS hours_bucket,
                         yes_price,
-                        LAG(yes_price) OVER (PARTITION BY ticker ORDER BY created_time) AS prev_price
+                        LAG(yes_price) OVER (
+                            PARTITION BY ticker, (hours_to_close / 6) * 6
+                            ORDER BY created_time
+                        ) AS prev_price
                     FROM kxrt_trades
                 )
                 SELECT

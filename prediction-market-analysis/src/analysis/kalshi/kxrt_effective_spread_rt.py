@@ -39,7 +39,10 @@ class KxrtEffectiveSpreadRtAnalysis(Analysis):
                     SELECT
                         (hours_to_close / 6) * 6 AS hours_bucket,
                         yes_price,
-                        LAG(yes_price) OVER (PARTITION BY ticker ORDER BY created_time) AS prev_price
+                        LAG(yes_price) OVER (
+                            PARTITION BY ticker, (hours_to_close / 6) * 6
+                            ORDER BY created_time
+                        ) AS prev_price
                     FROM kxrt_trades
                 )
                 SELECT
@@ -70,7 +73,7 @@ class KxrtEffectiveSpreadRtAnalysis(Analysis):
             data=[
                 {
                     "hours_to_close": f"{int(r['hours_bucket'])}-{int(r['hours_bucket']) + 6}h",
-                    "median_spread_cents": float(r["median_spread_cents"]),
+                    "median_spread_cents": round(float(r["median_spread_cents"]), 2),
                 }
                 for _, r in df.iterrows()
             ],

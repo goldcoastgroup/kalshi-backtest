@@ -37,7 +37,6 @@ class KxrtTradeArrivalRateRtAnalysis(Analysis):
                 WITH {kxrt_base_cte(self.trades_dir, self.markets_dir)}
                 SELECT
                     (hours_to_close / 6) * 6 AS hours_bucket,
-                    COUNT(*) AS trade_count,
                     COUNT(*) / 6.0 AS trades_per_hour
                 FROM kxrt_trades
                 GROUP BY hours_bucket

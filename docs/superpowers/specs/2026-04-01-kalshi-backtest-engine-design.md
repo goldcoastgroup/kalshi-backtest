@@ -17,19 +17,36 @@ NautilusTrader is a powerful but complex framework with many abstractions not ne
 
 ```
 kalshi-backtest/
+├── crates/
+│   └── engine/                # Rust crate — compiled to Python module via PyO3
+│       ├── Cargo.toml
+│       └── src/
+│           ├── lib.rs         # PyO3 module entry point
+│           ├── types.rs       # Data structs: Order, Fill, Position, FairValueData, etc.
+│           ├── orderbook.rs   # L2 OrderBook
+│           ├── exchange.rs    # SimulatedExchange — order matching, fill logic
+│           └── account.rs     # CashAccount — balance, positions, PnL
 ├── engine/
-│   ├── __init__.py        # Public API exports + BacktestEngine orchestrator
-│   ├── types.py           # Data classes: Order, Fill, Position, FairValueData, etc.
-│   ├── orderbook.py       # L2 OrderBook
-│   ├── exchange.py        # SimulatedExchange — order matching, fill logic
-│   ├── account.py         # CashAccount — balance, positions, PnL
-│   └── strategy.py        # Strategy base class
-├── prepare.py             # Data loading + parquet caching (FROZEN)
-├── train.py               # Strategy definition + config + execution (AGENT MODIFIES)
-├── program.md             # Training agent instructions
-├── pyproject.toml
-└── .env                   # MONGODB_URI
+│   ├── __init__.py            # Re-exports from Rust module + BacktestEngine orchestrator
+│   └── strategy.py            # Strategy base class (pure Python — strategies subclass this)
+├── prepare.py                 # Data loading + parquet caching (FROZEN)
+├── train.py                   # Strategy definition + config + execution (AGENT MODIFIES)
+├── program.md                 # Training agent instructions
+├── pyproject.toml             # maturin build config
+├── Cargo.toml                 # Workspace root
+└── .env                       # MONGODB_URI
 ```
+
+### Language Boundary
+
+The performance-critical engine core (orderbook, matching, account) is written in Rust and compiled to a native Python extension via PyO3 + maturin. Strategies remain in pure Python.
+
+| Layer | Language | Who modifies |
+|-------|----------|--------------|
+| `crates/engine/` (orderbook, matching, account) | Rust | User (rare) |
+| `engine/strategy.py` (strategy base class) | Python | User (rare) |
+| `train.py` (strategy impl, config, execution) | Python | Training agent |
+| `prepare.py` (data loading, caching) | Python | Frozen |
 
 ## Engine Architecture
 
@@ -49,85 +66,87 @@ for event in sorted(all_events, key=timestamp):
             strategy.on_data(data)
 ```
 
-### types.py — Data Classes
+### types.rs — Data Structs (exposed to Python via PyO3)
+
+All Rust structs derive `#[pyclass]` for direct Python access.
 
 **Instrument**
-- `id: str` — e.g. "KXRT-BRI-50"
-- `event_ticker: str` — e.g. "KXRT-BRI"
-- `price_precision: int` — decimal places for prices (4 for Kalshi)
-- `size_precision: int` — decimal places for quantities (2 for Kalshi)
-- `expiration_ns: int` — Unix nanosecond expiration timestamp
+- `id: String` — e.g. "KXRT-BRI-50"
+- `event_ticker: String` — e.g. "KXRT-BRI"
+- `price_precision: u8` — decimal places for prices (4 for Kalshi)
+- `size_precision: u8` — decimal places for quantities (2 for Kalshi)
+- `expiration_ns: i64` — Unix nanosecond expiration timestamp
 
 **FairValueData**
-- `timestamp_ns: int` — Unix nanoseconds
-- `instrument_id: str`
-- `fv: float` — model fair value [0, 1]
-- `theta: float` — hourly time decay
-- `gamma_pos: float` — sensitivity to positive review
-- `gamma_neg: float` — sensitivity to negative review
+- `timestamp_ns: i64` — Unix nanoseconds
+- `instrument_id: String`
+- `fv: f64` — model fair value [0, 1]
+- `theta: f64` — hourly time decay
+- `gamma_pos: f64` — sensitivity to positive review
+- `gamma_neg: f64` — sensitivity to negative review
 - `new_review: bool`
-- `hours_left: float`
-- `cur_score: float`
-- `total_reviews: int`
+- `hours_left: f64`
+- `cur_score: f64`
+- `total_reviews: i32`
 
 **OrderBookDelta**
-- `instrument_id: str`
-- `timestamp_ns: int`
-- `action: str` — "CLEAR", "ADD", "UPDATE", "DELETE"
-- `side: str` — "BUY" or "SELL"
-- `price: float`
-- `size: float`
-- `flags: int` — bitmask: F_SNAPSHOT=1, F_LAST=2
+- `instrument_id: String`
+- `timestamp_ns: i64`
+- `action: BookAction` — enum: Clear, Add, Update, Delete
+- `side: OrderSide` — enum: Buy, Sell
+- `price: f64`
+- `size: f64`
+- `flags: u8` — bitmask: F_SNAPSHOT=1, F_LAST=2
 
 **Order**
-- `id: str` — unique order ID
-- `instrument_id: str`
-- `side: str` — "BUY" or "SELL"
-- `price: Decimal`
-- `quantity: Decimal`
-- `filled_qty: Decimal`
+- `id: String` — unique order ID
+- `instrument_id: String`
+- `side: OrderSide`
+- `price: f64` — stored as cents internally (i64) for exact arithmetic
+- `quantity: f64`
+- `filled_qty: f64`
 - `post_only: bool`
-- `status: str` — "SUBMITTED", "RESTING", "FILLED", "CANCELED", "REJECTED"
-- `is_maker: bool | None` — set on fill
-- `avg_fill_price: Decimal | None`
-- `submit_timestamp_ns: int`
-- `fill_timestamp_ns: int | None`
+- `status: OrderStatus` — enum: Submitted, Resting, Filled, Canceled, Rejected
+- `is_maker: Option<bool>` — set on fill
+- `avg_fill_price: Option<f64>`
+- `submit_timestamp_ns: i64`
+- `fill_timestamp_ns: Option<i64>`
 
 **Fill**
-- `order_id: str`
-- `instrument_id: str`
-- `side: str`
-- `price: Decimal`
-- `quantity: Decimal`
-- `fee: Decimal`
+- `order_id: String`
+- `instrument_id: String`
+- `side: OrderSide`
+- `price: f64`
+- `quantity: f64`
+- `fee: f64`
 - `is_maker: bool`
-- `timestamp_ns: int`
+- `timestamp_ns: i64`
 
 **Position**
-- `instrument_id: str`
-- `signed_qty: Decimal` — positive = long, negative = short
-- `realized_pnl: Decimal`
-- `cost_basis: Decimal` — total cost of current position
-- `entry_count: int` — number of position entries (for stats)
+- `instrument_id: String`
+- `signed_qty: f64` — positive = long, negative = short
+- `realized_pnl: f64`
+- `avg_entry_price: f64`
+- `entry_count: u32` — number of position entries (for stats)
 
-### orderbook.py — L2 OrderBook
+### orderbook.rs — L2 OrderBook
 
 Maintains a per-instrument orderbook with bid and ask sides.
 
-Internal state: `bids: SortedDict[float, float]` (price → size, descending), `asks: SortedDict[float, float]` (price → size, ascending).
+Internal state: `bids: BTreeMap<i64, f64>` (price-in-cents → size, descending), `asks: BTreeMap<i64, f64>` (price-in-cents → size, ascending). Prices stored as integer cents for exact comparison.
 
-Methods:
-- `apply(delta: OrderBookDelta)` — process CLEAR/ADD/UPDATE/DELETE
-  - CLEAR: wipe both sides
-  - ADD: set price level to given size
-  - UPDATE: update price level size
-  - DELETE: remove price level
-- `best_bid() -> tuple[float, float] | None` — (price, size)
-- `best_ask() -> tuple[float, float] | None` — (price, size)
-- `consume_ask(qty: float) -> float` — remove up to qty from best ask, return actual consumed
-- `consume_bid(qty: float) -> float` — remove up to qty from best bid, return actual consumed
+Methods (exposed via `#[pymethods]`):
+- `apply(delta: &OrderBookDelta)` — process Clear/Add/Update/Delete
+  - Clear: wipe both sides
+  - Add: set price level to given size
+  - Update: update price level size
+  - Delete: remove price level
+- `best_bid() -> Option<(f64, f64)>` — (price, size)
+- `best_ask() -> Option<(f64, f64)>` — (price, size)
+- `consume_ask(qty: f64) -> f64` — remove up to qty from best ask, return actual consumed
+- `consume_bid(qty: f64) -> f64` — remove up to qty from best bid, return actual consumed
 
-### exchange.py — SimulatedExchange
+### exchange.rs — SimulatedExchange
 
 Manages resting orders and matching logic for all instruments.
 
@@ -147,32 +166,32 @@ Manages resting orders and matching logic for all instruments.
 
 **Modify order:** change quantity of a resting order (price cannot change — cancel and re-submit for price change).
 
-**Cancel order:** remove from resting orders, set status to CANCELED.
+**Cancel order:** remove from resting orders, set status to Canceled.
 
-**Fee model (Kalshi proportional):**
+**Fee model (Kalshi proportional, built into exchange):**
 - Maker fills: $0 fee
 - Taker fills: `ceil(0.07 * qty * price * (1 - price) * 100) / 100`
 
-### account.py — CashAccount
+### account.rs — CashAccount
 
-- `starting_balance: Decimal`
-- `balance: Decimal` — current available cash
-- `positions: dict[str, Position]` — per-instrument net positions
+- `starting_balance: f64`
+- `balance: f64` — current available cash
+- `positions: HashMap<String, Position>` — per-instrument net positions
 - On BUY fill: `balance -= fill_price * fill_qty + fee`
 - On SELL fill: `balance += fill_price * fill_qty - fee`
 - Position updated: signed_qty adjusted, realized_pnl computed when position reduces/closes
-- `balance_free() -> Decimal` — current balance
+- `balance_free() -> f64` — current balance
 
 Realized PnL calculation:
 - When a fill reduces position size (e.g., selling when long), compute PnL as:
   `pnl = (fill_price - avg_entry_price) * fill_qty` for closing a long
   `pnl = (avg_entry_price - fill_price) * fill_qty` for closing a short
 
-### strategy.py — Strategy Base Class
+### strategy.py — Strategy Base Class (pure Python)
 
 ```python
 class Strategy:
-    """Base class for backtest strategies."""
+    """Base class for backtest strategies. Subclassed in train.py."""
 
     def __init__(self, instrument_id: str):
         self.instrument_id = instrument_id
@@ -185,34 +204,43 @@ class Strategy:
     def on_fill(self, fill: Fill): ...
     def on_stop(self): ...
 
-    # ── Engine interaction (provided by base class) ──
+    # ── Engine interaction (provided by base class, delegates to Rust) ──
     def submit_order(self, side, price, quantity, post_only=True) -> Order: ...
     def modify_order(self, order_id, new_quantity): ...
     def cancel_order(self, order_id): ...
     def get_book(self, instrument_id=None) -> OrderBook: ...
     def get_position(self, instrument_id=None) -> Position: ...
-    def get_balance() -> Decimal: ...
+    def get_balance() -> float: ...
 ```
 
-### BacktestEngine (engine/__init__.py)
+### BacktestEngine (engine/__init__.py — Python orchestrator calling Rust)
+
+The BacktestEngine lives in Python but delegates hot-path operations to the Rust exchange/account. The event loop itself runs in Rust for maximum throughput — Python strategies are called back via PyO3.
 
 ```python
 class BacktestEngine:
     def __init__(self, instruments, starting_balance):
-        self.account = CashAccount(starting_balance)
-        self.exchange = SimulatedExchange(account, orderbooks)
+        # Creates Rust-side exchange + account
+        self._core = _engine.EngineCore(instruments, starting_balance)
         self.strategies = {}  # instrument_id -> Strategy
 
     def add_strategy(self, strategy: Strategy): ...
 
     def run(self, fair_values, orderbook_deltas):
-        # Merge and sort all events by timestamp
-        # Call on_start() for all strategies
-        # Process events chronologically
-        # Call on_stop() for all strategies
+        # Pass all events to Rust core
+        # Rust sorts and iterates, calling back into Python strategies
+        # via on_data() / on_book_update() / on_fill()
 
     def print_results(): ...
 ```
+
+The Rust `EngineCore` exposes:
+- `run(events, strategy_callbacks)` — the main event loop
+- `submit_order(instrument_id, side, price, qty, post_only)` — called by strategy
+- `modify_order(order_id, new_qty)`
+- `cancel_order(order_id)`
+- Query methods: `best_bid`, `best_ask`, `get_position`, `get_balance`
+- Results accessors: `orders()`, `fills()`, `positions()`, `final_balance()`
 
 ## prepare.py
 
@@ -296,9 +324,16 @@ if __name__ == "__main__":
 - Per-event breakdown
 - Capital efficiency (turnover, PnL/turnover)
 
-## Dependencies
+## Build System
+
+Uses **maturin** to compile the Rust crate into a Python extension module. The project is a mixed Rust+Python package.
 
 ```toml
+# pyproject.toml
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
 [project]
 name = "kalshi-backtest"
 version = "0.1.0"
@@ -310,9 +345,36 @@ dependencies = [
     "pymongo",
     "python-dotenv",
     "httpx",
-    "sortedcontainers",
 ]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "engine._engine"
 ```
+
+```toml
+# Cargo.toml (workspace root)
+[workspace]
+members = ["crates/engine"]
+
+# crates/engine/Cargo.toml
+[package]
+name = "kalshi-backtest-engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "_engine"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+```
+
+**Development workflow:**
+- `maturin develop` — compile Rust and install into current venv
+- `uv run train.py` — run backtest (after maturin develop)
+- Rust changes require `maturin develop` rebuild; Python changes take effect immediately
 
 Plus `kxrt_fv` from the sandbox repo (via PYTHONPATH or editable install).
 

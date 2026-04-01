@@ -44,6 +44,7 @@ from engine._engine import (  # noqa: E402
 
 CACHE_DIR = Path.home() / ".cache" / "kalshi-backtest"
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+MODEL_NAME = "xgb_ff99dd2"
 
 
 @dataclass
@@ -139,7 +140,7 @@ def _load_fair_values(
 
         print(f"  [{i}/{len(event_markets)}] {event_ticker} ({len(tickers)} markets)...", end=" ", flush=True)
         try:
-            snapshots = kxrt_backtest(tickers=tickers)
+            snapshots = kxrt_backtest(tickers=tickers, model_name=MODEL_NAME)
             records = []
             for ticker, snaps in snapshots.items():
                 for snap in snaps:

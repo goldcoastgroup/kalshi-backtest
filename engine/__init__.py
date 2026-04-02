@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from engine._engine import (  # noqa: F401
+    AggressorSide,
     BookAction,
     EngineCore,
     F_LAST,
@@ -18,6 +19,7 @@ from engine._engine import (  # noqa: F401
     OrderSide,
     OrderStatus,
     Position,
+    TradeTick,
 )
 from engine.strategy import Strategy
 
@@ -43,15 +45,19 @@ class BacktestEngine:
         self,
         fair_values: list[FairValueData],
         orderbook_deltas: list[OrderBookDelta],
+        trades: list[TradeTick] | None = None,
     ) -> None:
         """Run the backtest: merge events, replay chronologically."""
         # Build sorted event list: (timestamp_ns, type_priority, event)
-        # type_priority: 0=OB delta (process book first), 1=FV data
+        # type_priority: 0=OB delta (book first), 1=trade tick, 2=FV data
         events: list[tuple[int, int, object]] = []
         for delta in orderbook_deltas:
             events.append((delta.timestamp_ns, 0, delta))
+        if trades:
+            for trade in trades:
+                events.append((trade.timestamp_ns, 1, trade))
         for fv in fair_values:
-            events.append((fv.timestamp_ns, 1, fv))
+            events.append((fv.timestamp_ns, 2, fv))
 
         events.sort(key=lambda e: (e[0], e[1]))
 
@@ -62,20 +68,58 @@ class BacktestEngine:
         # Event loop
         for _, type_prio, event in events:
             if type_prio == 0:
+                # Orderbook delta
                 delta = event
                 self._core.apply_delta(delta)
-                if delta.flags & F_LAST:
-                    fills = self._core.check_resting_orders(
-                        delta.instrument_id, delta.timestamp_ns,
-                    )
-                    for fill in fills:
-                        strat = self._strategies.get(fill.instrument_id)
+
+                if delta.flags & F_SNAPSHOT:
+                    settled = False
+                    if delta.flags & F_LAST:
+                        bb = self._core.best_bid(delta.instrument_id)
+                        ba = self._core.best_ask(delta.instrument_id)
+                        is_settlement = (
+                            bb is not None and ba is not None
+                            and abs(bb[0] - ba[0]) < 0.001
+                            and (bb[0] >= 0.98 or ba[0] <= 0.02)
+                        )
+                        if is_settlement:
+                            settled = True
+                            # Settle at actual price: 1.00 (YES) or 0.00 (NO)
+                            settlement_price = 1.0 if bb[0] >= 0.50 else 0.0
+                            settlement_fills = self._core.settle_instrument(
+                                delta.instrument_id, settlement_price,
+                                delta.timestamp_ns,
+                            )
+                            for fill in settlement_fills:
+                                strat = self._strategies.get(fill.instrument_id)
+                                if strat:
+                                    strat.on_fill(fill)
+                        else:
+                            pass  # Resting fills only from trade ticks
+                    # Fire strategy on every snapshot delta (matches nautilus
+                    # buffer_deltas=False), skip only settlement F_LAST
+                    if not settled:
+                        strat = self._strategies.get(delta.instrument_id)
                         if strat:
-                            strat.on_fill(fill)
+                            strat.on_book_update(delta.instrument_id, delta.timestamp_ns)
+                else:
+                    # Nautilus default: buffer_deltas=False means strategy
+                    # fires on every individual delta, not just F_LAST batches
                     strat = self._strategies.get(delta.instrument_id)
                     if strat:
-                        strat.on_book_update(delta.instrument_id)
+                        strat.on_book_update(delta.instrument_id, delta.timestamp_ns)
+
+            elif type_prio == 1:
+                # Trade tick — decrement queues and check fills
+                trade = event
+                fills = self._core.process_trade_tick(trade)
+                for fill in fills:
+                    strat = self._strategies.get(fill.instrument_id)
+                    if strat:
+                        strat.on_fill(fill)
+
             else:
+                # Fair value data
                 fv = event
                 strat = self._strategies.get(fv.instrument_id)
                 if strat:
@@ -84,6 +128,10 @@ class BacktestEngine:
         # Stop strategies
         for strategy in self._strategies.values():
             strategy.on_stop()
+
+        # Engine-level settlement: close any remaining open positions
+        # at the final book price (matches nautilus InstrumentClose behavior)
+        self._core.settle_all()
 
     def print_results(self) -> None:
         """Print comprehensive backtest statistics."""

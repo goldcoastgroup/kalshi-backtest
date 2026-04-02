@@ -1,59 +1,63 @@
 """
-Kalshi backtest: OrderBookImbalance strategy.
+Kalshi backtest strategy definition.
 
-Emulates the nautilus OrderBookImbalance strategy:
-- On book update, checks bid/ask size ratio
-- When imbalance exceeds threshold, submits aggressive FOK-style order
-- Buys at best ask when bid >> ask, sells at best bid when ask >> bid
-
-Usage:
-    python train.py
+This is the ONLY file the training agent modifies.
+It defines the strategy class, configuration constants, and calls
+prepare.run_backtest() to execute.
 """
 
 from __future__ import annotations
 
-import time
+import math
 
 import prepare
-from engine import BacktestEngine, FairValueData, Fill, OrderSide, OrderStatus, TimeInForce
+from engine import FairValueData, Fill, OrderSide, OrderStatus, TimeInForce
 from engine.strategy import Strategy
 
 
-# ── Config (matches nautilus kxrt_baseline_backtest.py) ──
+# ── Config ──────────────────────────────────────────────────────────
 
-EVENT_TICKERS = [
-    "KXRT-BRI",
-    "KXRT-HOP",
-    "KXRT-REM",
-]
-MAX_TRADE_SIZE = 100
-TRIGGER_MIN_SIZE = 1.0
-TRIGGER_IMBALANCE_RATIO = 0.20
-MIN_SECONDS_BETWEEN_TRIGGERS = 60.0
-STARTING_BALANCE = 10_000
+HALF_SPREAD = 0.03          # quote 3c each side of FV
+MAX_POSITION = 50           # max contracts long or short per instrument
+ORDER_SIZE = 10             # contracts per quote
+REQUOTE_INTERVAL_NS = 5 * 60 * 1_000_000_000   # requote every 5 min
+REQUOTE_FV_DELTA = 0.02     # or if FV moved more than 2c
 
 
-# ── Strategy ──
+# ── Strategy ────────────────────────────────────────────────────────
 
-class OrderBookImbalance(Strategy):
+class FVMarketMaker(Strategy):
     """
-    Order book imbalance strategy (aggressive taker).
+    Simple market maker: quote bid/ask around fair value.
 
-    When bid size significantly exceeds ask size (ratio below threshold),
-    buys at the ask. When ask size exceeds bid size, sells at the bid.
+    - On FV update, requote if enough time elapsed or FV moved significantly.
+    - POST_ONLY bid at (fv - half_spread), ask at (fv + half_spread).
+    - Skips the side where position limit would be breached.
     """
 
     def __init__(self, instrument_id: str):
         super().__init__(instrument_id)
-        self._last_trigger_ns: int | None = None
+        self._bid_order_id: str | None = None
+        self._ask_order_id: str | None = None
+        self._last_fv: float | None = None
+        self._last_quote_fv: float | None = None
+        self._last_quote_ts: int = 0
 
     def on_data(self, data: FairValueData) -> None:
-        pass  # This strategy doesn't use FV data
+        self._last_fv = data.fv
+
+        # Only requote if enough time passed or FV moved meaningfully
+        fv_moved = (
+            self._last_quote_fv is None
+            or abs(data.fv - self._last_quote_fv) >= REQUOTE_FV_DELTA
+        )
+        time_elapsed = data.timestamp_ns - self._last_quote_ts >= REQUOTE_INTERVAL_NS
+
+        if fv_moved or time_elapsed:
+            self._requote(data.timestamp_ns)
 
     def on_book_update(self, instrument_id: str, timestamp_ns: int = 0) -> None:
-        if instrument_id != self.instrument_id:
-            return
-        self._check_trigger(timestamp_ns)
+        pass
 
     def on_fill(self, fill: Fill) -> None:
         pass
@@ -61,83 +65,63 @@ class OrderBookImbalance(Strategy):
     def on_stop(self) -> None:
         pass
 
-    def _check_trigger(self, timestamp_ns: int) -> None:
-        bid = self.best_bid()
-        ask = self.best_ask()
-
-        if bid is None or ask is None:
+    def _requote(self, timestamp_ns: int) -> None:
+        fv = self._last_fv
+        if fv is None:
             return
 
-        bid_price, bid_size = bid
-        ask_price, ask_size = ask
+        # Cancel existing quotes
+        if self._bid_order_id is not None:
+            self.cancel_order(self._bid_order_id)
+            self._bid_order_id = None
+        if self._ask_order_id is not None:
+            self.cancel_order(self._ask_order_id)
+            self._ask_order_id = None
 
-        # Nautilus: `if not spread:` skips None and 0.0 (locked), but
-        # allows negative spread (crossed book) through.
-        if ask_price == bid_price:
+        self._last_quote_fv = fv
+        self._last_quote_ts = timestamp_ns
+
+        pos = self.get_position()
+        qty = pos.signed_qty
+
+        # Compute quote prices (round to nearest cent)
+        bid_price = math.floor((fv - HALF_SPREAD) * 100) / 100
+        ask_price = math.ceil((fv + HALF_SPREAD) * 100) / 100
+
+        # Clamp to valid range
+        bid_price = max(0.01, min(0.99, bid_price))
+        ask_price = max(0.01, min(0.99, ask_price))
+
+        # Don't quote if spread collapses
+        if bid_price >= ask_price:
             return
 
-        if bid_size <= 0 or ask_size <= 0:
-            return
+        # Quote bid (only if not max long)
+        if qty < MAX_POSITION:
+            bid_qty = min(ORDER_SIZE, MAX_POSITION - int(qty))
+            if bid_qty >= 1:
+                order, fill = self.submit_order(
+                    OrderSide.Buy, bid_price, bid_qty,
+                    time_in_force=TimeInForce.POST_ONLY,
+                    timestamp_ns=timestamp_ns,
+                )
+                if order.status not in (OrderStatus.Rejected, OrderStatus.Canceled):
+                    self._bid_order_id = order.id
 
-        smaller = min(bid_size, ask_size)
-        larger = max(bid_size, ask_size)
-        ratio = smaller / larger
-
-        if larger <= TRIGGER_MIN_SIZE:
-            return
-        if ratio > TRIGGER_IMBALANCE_RATIO:
-            return
-
-        # Cooldown check (60 seconds = 60e9 nanoseconds)
-        cooldown_ns = int(MIN_SECONDS_BETWEEN_TRIGGERS * 1_000_000_000)
-        if self._last_trigger_ns is not None:
-            if timestamp_ns - self._last_trigger_ns < cooldown_ns:
-                return
-
-        if bid_size > ask_size:
-            side = OrderSide.Buy
-            price = ask_price
-            level_size = ask_size
-        else:
-            side = OrderSide.Sell
-            price = bid_price
-            level_size = bid_size
-
-        trade_qty = min(level_size, MAX_TRADE_SIZE)
-        if trade_qty <= 0:
-            return
-
-        self._last_trigger_ns = timestamp_ns
-
-        # Submit aggressive order (FOK)
-        order, fill = self.submit_order(
-            side, price, trade_qty, time_in_force=TimeInForce.FOK, timestamp_ns=timestamp_ns,
-        )
-        if fill:
-            self.on_fill(fill)
+        # Quote ask (only if not max short)
+        if qty > -MAX_POSITION:
+            ask_qty = min(ORDER_SIZE, MAX_POSITION + int(qty))
+            if ask_qty >= 1:
+                order, fill = self.submit_order(
+                    OrderSide.Sell, ask_price, ask_qty,
+                    time_in_force=TimeInForce.POST_ONLY,
+                    timestamp_ns=timestamp_ns,
+                )
+                if order.status not in (OrderStatus.Rejected, OrderStatus.Canceled):
+                    self._ask_order_id = order.id
 
 
-# ── Main ──
-
-def main() -> None:
-    print("Loading data...")
-    t0 = time.time()
-    data = prepare.load(EVENT_TICKERS)
-    load_time = time.time() - t0
-    print(f"Data loaded in {load_time:.1f}s\n")
-
-    engine = BacktestEngine(data.instruments, STARTING_BALANCE)
-    for inst in data.instruments:
-        engine.add_strategy(OrderBookImbalance(inst.id))
-
-    print(f"Running backtest with {len(data.instruments)} instruments...")
-    t0 = time.time()
-    engine.run(data.fair_values, data.orderbook_deltas, data.trades)
-    run_time = time.time() - t0
-    print(f"Backtest completed in {run_time:.1f}s")
-
-    engine.print_results()
-
+# ── Run ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    main()
+    prepare.run_backtest(strategy_factory=FVMarketMaker)

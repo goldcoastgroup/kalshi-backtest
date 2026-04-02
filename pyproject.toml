@@ -19,3 +19,4 @@ dependencies = [
 features = ["pyo3/extension-module"]
 module-name = "engine._engine"
 python-source = "."
+manifest-path = "crates/engine/Cargo.toml"

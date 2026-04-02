@@ -19,6 +19,13 @@ impl CashAccount {
     }
 
     /// Process a fill: update cash balance and position.
+    ///
+    /// Binary option (fully collateralized) cash flows:
+    ///   BUY  opening long:  balance -= price * qty       (pay for YES contract)
+    ///   BUY  closing short: balance += (1-price) * qty   (NO margin returned)
+    ///   SELL closing long:  balance += price * qty        (sell YES contract)
+    ///   SELL opening short: balance -= (1-price) * qty   (post NO margin)
+    ///   Fees always deducted.
     pub fn process_fill(
         &mut self,
         instrument_id: &str,
@@ -27,17 +34,7 @@ impl CashAccount {
         qty: f64,
         fee: f64,
     ) {
-        // Update cash balance
-        match side {
-            OrderSide::Buy => {
-                self.balance -= price * qty + fee;
-            }
-            OrderSide::Sell => {
-                self.balance += price * qty - fee;
-            }
-        }
-
-        // Update position
+        // Determine closing vs opening quantities BEFORE updating position
         let pos = self
             .positions
             .entry(instrument_id.to_string())
@@ -54,6 +51,27 @@ impl CashAccount {
         // Determine if this fill is closing, opening, or flipping
         let is_reducing = (old_qty > 0.0 && fill_signed < 0.0)
             || (old_qty < 0.0 && fill_signed > 0.0);
+
+        let (close_qty, open_qty) = if is_reducing {
+            let close = qty.min(old_qty.abs());
+            (close, qty - close)
+        } else {
+            (0.0, qty)
+        };
+
+        // Update cash balance using binary-option collateral model
+        match side {
+            OrderSide::Buy => {
+                // Closing short: margin (1-price) returned per contract
+                // Opening long: pay price per contract
+                self.balance += close_qty * (1.0 - price) - open_qty * price - fee;
+            }
+            OrderSide::Sell => {
+                // Closing long: receive price per contract
+                // Opening short: post (1-price) margin per contract
+                self.balance += close_qty * price - open_qty * (1.0 - price) - fee;
+            }
+        }
 
         if is_reducing {
             let close_qty = qty.min(old_qty.abs());
@@ -163,32 +181,53 @@ mod tests {
     #[test]
     fn test_short_position() {
         let mut acct = CashAccount::new(10_000.0);
+        // Sell to open short: balance -= (1-0.60)*10 = -4.0 (post NO margin)
         acct.process_fill("X", &OrderSide::Sell, 0.60, 10.0, 0.0);
         let pos = acct.get_position("X");
         assert_eq!(pos.signed_qty, -10.0);
         assert!((pos.avg_entry_price - 0.60).abs() < 1e-9);
+        assert!((acct.balance - 9996.0).abs() < 1e-9); // 10000 - 4.0
     }
 
     #[test]
     fn test_close_short_pnl() {
         let mut acct = CashAccount::new(10_000.0);
+        // Sell to open short @ 0.60: balance -= (1-0.60)*10 = -4.0
         acct.process_fill("X", &OrderSide::Sell, 0.60, 10.0, 0.0);
+        assert!((acct.balance - 9996.0).abs() < 1e-9);
+        // Buy to close short @ 0.40: balance += (1-0.40)*10 = +6.0 (margin returned)
         acct.process_fill("X", &OrderSide::Buy, 0.40, 10.0, 0.0);
         let pos = acct.get_position("X");
         // pnl = (0.60 - 0.40) * 10 = 2.0
         assert!((pos.realized_pnl - 2.0).abs() < 1e-9);
         assert_eq!(pos.signed_qty, 0.0);
+        // balance = 9996 + 6 = 10002 = 10000 + 2.0 pnl
+        assert!((acct.balance - 10002.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_fee_deducted() {
         let mut acct = CashAccount::new(10_000.0);
+        // Buy to open long: balance -= price*qty + fee = 5 + 1 = 6
         acct.process_fill("X", &OrderSide::Buy, 0.50, 10.0, 1.0);
-        // balance = 10000 - (5.0 + 1.0) = 9994.0
         assert!((acct.balance - 9994.0).abs() < 1e-9);
 
+        // Sell to close long: balance += price*qty - fee = 5 - 1 = 4
         acct.process_fill("X", &OrderSide::Sell, 0.50, 10.0, 1.0);
-        // balance = 9994.0 + (5.0 - 1.0) = 9998.0
         assert!((acct.balance - 9998.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_short_open_close_balance() {
+        // Full cycle: open short, close short, verify balance = starting + pnl - fees
+        let mut acct = CashAccount::new(10_000.0);
+        // Sell to open short @ 0.90: balance -= (1-0.90)*100 = -10
+        acct.process_fill("X", &OrderSide::Sell, 0.90, 100.0, 1.0);
+        assert!((acct.balance - 9989.0).abs() < 1e-9); // 10000 - 10 - 1
+        // Buy to close short @ 0.80: balance += (1-0.80)*100 = +20
+        acct.process_fill("X", &OrderSide::Buy, 0.80, 100.0, 1.0);
+        // balance = 9989 + 20 - 1 = 10008
+        // Expected: 10000 + (0.90-0.80)*100 pnl - 2 fees = 10000 + 10 - 2 = 10008
+        assert!((acct.balance - 10008.0).abs() < 1e-9);
     }
 }

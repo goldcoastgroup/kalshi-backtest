@@ -1,9 +1,12 @@
 """
-Data loading and caching for Kalshi backtests.
+Data loading, engine setup, and evaluation for Kalshi backtests.
 
 Loads fair values (via kxrt_fv), orderbook data (MongoDB), instruments
 (Kalshi REST API), and settlement outcomes (MongoDB). All data is cached
 to parquet/JSON files under ~/.cache/kalshi-backtest/.
+
+Also provides run_backtest() which wires up the engine, runs the
+strategy, and prints results. train.py calls this as its entry point.
 
 This file is FROZEN — the training agent must not modify it.
 """
@@ -13,14 +16,20 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
+import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from pymongo import MongoClient
+
+if TYPE_CHECKING:
+    from engine.strategy import Strategy
 
 # Load env from sandbox
 load_dotenv(Path(__file__).resolve().parent / ".." / "sandbox" / ".env")
@@ -33,6 +42,7 @@ if _sandbox not in sys.path:
 from kxrt_fv import backtest as kxrt_backtest  # noqa: E402
 
 from engine._engine import (  # noqa: E402
+    AggressorSide,
     BookAction,
     F_LAST,
     F_SNAPSHOT,
@@ -40,11 +50,24 @@ from engine._engine import (  # noqa: E402
     Instrument,
     OrderBookDelta,
     OrderSide,
+    TradeTick,
 )
 
 CACHE_DIR = Path.home() / ".cache" / "kalshi-backtest"
+LOCAL_CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 MODEL_NAME = "xgb_ff99dd2"
+
+# ── Frozen constants (do NOT modify in train.py) ──
+
+EVENT_TICKERS = [
+    "KXRT-BRI",
+    "KXRT-HOP",
+    "KXRT-PRO",
+    "KXRT-REA",
+    "KXRT-REM",
+]
+STARTING_BALANCE = 10_000
 
 
 @dataclass
@@ -52,6 +75,7 @@ class BacktestData:
     instruments: list[Instrument]
     fair_values: list[FairValueData]
     orderbook_deltas: list[OrderBookDelta]
+    trades: list[TradeTick]
 
 
 def load(event_tickers: list[str], refresh: bool = False) -> BacktestData:
@@ -83,7 +107,12 @@ def load(event_tickers: list[str], refresh: bool = False) -> BacktestData:
     ob_deltas = _load_orderbooks(event_markets, inst_map, refresh)
     print(f"  {len(ob_deltas)} orderbook deltas\n")
 
-    # Phase 5: Settlement outcomes + synthetic deltas
+    # Phase 5: Trade data from Kalshi API
+    print("Loading trade data...")
+    trades = _load_trades(all_tickers, refresh)
+    print(f"  {len(trades)} trades\n")
+
+    # Phase 6: Settlement outcomes + synthetic deltas
     print("Loading settlement outcomes...")
     outcomes = _load_outcomes(refresh)
     settlement_deltas = _build_settlement_deltas(inst_map, outcomes, ob_deltas)
@@ -98,8 +127,10 @@ def load(event_tickers: list[str], refresh: bool = False) -> BacktestData:
     fair_values = [fv for fv in fair_values if fv.instrument_id in active_tickers]
     all_deltas = [d for d in all_deltas if d.instrument_id in active_tickers]
 
-    print(f"Ready: {len(instruments)} instruments, {len(fair_values)} FV, {len(all_deltas)} OB deltas")
-    return BacktestData(instruments=instruments, fair_values=fair_values, orderbook_deltas=all_deltas)
+    trades = [t for t in trades if t.instrument_id in active_tickers]
+
+    print(f"Ready: {len(instruments)} instruments, {len(fair_values)} FV, {len(all_deltas)} OB deltas, {len(trades)} trades\n")
+    return BacktestData(instruments=instruments, fair_values=fair_values, orderbook_deltas=all_deltas, trades=trades)
 
 
 # ── Internal loaders ──
@@ -170,20 +201,33 @@ def _load_fair_values(
 
 def _df_to_fair_values(df: pd.DataFrame) -> list[FairValueData]:
     """Convert DataFrame rows to FairValueData objects."""
-    result = []
-    for _, row in df.iterrows():
-        result.append(FairValueData(
-            timestamp_ns=int(row["timestamp_ns"]),
-            instrument_id=str(row["instrument_id"]),
-            fv=float(row["fv"]),
-            theta=float(row["theta"]),
-            gamma_pos=float(row["gamma_pos"]),
-            gamma_neg=float(row["gamma_neg"]),
-            new_review=bool(row["new_review"]),
-            hours_left=float(row["hours_left"]),
-            cur_score=float(row["cur_score"]),
-            total_reviews=int(row["total_reviews"]),
-        ))
+    if df.empty:
+        return []
+    ts = df["timestamp_ns"].values
+    ids = df["instrument_id"].values
+    fvs = df["fv"].values
+    thetas = df["theta"].values
+    gpos = df["gamma_pos"].values
+    gneg = df["gamma_neg"].values
+    nrs = df["new_review"].values
+    hrs = df["hours_left"].values
+    scores = df["cur_score"].values
+    reviews = df["total_reviews"].values
+    n = len(df)
+    result = [None] * n
+    for i in range(n):
+        result[i] = FairValueData(
+            timestamp_ns=int(ts[i]),
+            instrument_id=str(ids[i]),
+            fv=float(fvs[i]),
+            theta=float(thetas[i]),
+            gamma_pos=float(gpos[i]),
+            gamma_neg=float(gneg[i]),
+            new_review=bool(nrs[i]),
+            hours_left=float(hrs[i]),
+            cur_score=float(scores[i]),
+            total_reviews=int(reviews[i]),
+        )
     return result
 
 
@@ -240,16 +284,24 @@ def _load_instruments(
 
 
 def _df_to_instruments(df: pd.DataFrame) -> list[Instrument]:
-    return [
-        Instrument(
-            id=str(row["id"]),
-            event_ticker=str(row["event_ticker"]),
-            price_precision=int(row["price_precision"]),
-            size_precision=int(row["size_precision"]),
-            expiration_ns=int(row["expiration_ns"]),
+    if df.empty:
+        return []
+    ids = df["id"].values
+    events = df["event_ticker"].values
+    pp = df["price_precision"].values
+    sp = df["size_precision"].values
+    exp = df["expiration_ns"].values
+    n = len(df)
+    result = [None] * n
+    for i in range(n):
+        result[i] = Instrument(
+            id=str(ids[i]),
+            event_ticker=str(events[i]),
+            price_precision=int(pp[i]),
+            size_precision=int(sp[i]),
+            expiration_ns=int(exp[i]),
         )
-        for _, row in df.iterrows()
-    ]
+    return result
 
 
 def _parse_iso_to_ns(iso_str: str) -> int:
@@ -375,20 +427,166 @@ def _transform_ob_docs(docs: list[dict]) -> list[dict]:
 
 def _df_to_ob_deltas(df: pd.DataFrame) -> list[OrderBookDelta]:
     """Convert DataFrame rows to OrderBookDelta objects."""
+    if df.empty:
+        return []
     action_map = {"CLEAR": BookAction.Clear, "ADD": BookAction.Add,
                   "UPDATE": BookAction.Update, "DELETE": BookAction.Delete}
     side_map = {"BUY": OrderSide.Buy, "SELL": OrderSide.Sell}
-    result = []
-    for _, row in df.iterrows():
-        result.append(OrderBookDelta(
-            instrument_id=str(row["instrument_id"]),
-            timestamp_ns=int(row["timestamp_ns"]),
-            action=action_map[row["action"]],
-            side=side_map[row["side"]],
-            price=float(row["price"]),
-            size=float(row["size"]),
-            flags=int(row["flags"]),
-        ))
+    # Extract columns as arrays for fast iteration (avoid iterrows overhead)
+    ids = df["instrument_id"].values
+    ts = df["timestamp_ns"].values
+    actions = df["action"].values
+    sides = df["side"].values
+    prices = df["price"].values
+    sizes = df["size"].values
+    flags = df["flags"].values
+    n = len(df)
+    result = [None] * n
+    for i in range(n):
+        result[i] = OrderBookDelta(
+            instrument_id=str(ids[i]),
+            timestamp_ns=int(ts[i]),
+            action=action_map[actions[i]],
+            side=side_map[sides[i]],
+            price=float(prices[i]),
+            size=float(sizes[i]),
+            flags=int(flags[i]),
+        )
+    return result
+
+
+def _load_trades(all_tickers: list[str], refresh: bool) -> list[TradeTick]:
+    """Fetch historical trades from Kalshi REST API, cache to parquet."""
+    trade_dir = CACHE_DIR / "trades"
+    trade_dir.mkdir(exist_ok=True)
+    all_trades: list[TradeTick] = []
+
+    # Group tickers by event for caching
+    ticker_events: dict[str, str] = {}
+    for ticker in all_tickers:
+        event = "-".join(ticker.split("-")[:2])
+        ticker_events[ticker] = event
+
+    events = sorted(set(ticker_events.values()))
+    event_tickers: dict[str, list[str]] = {e: [] for e in events}
+    for ticker, event in ticker_events.items():
+        event_tickers[event].append(ticker)
+
+    for event in events:
+        cache_file = trade_dir / f"{event}.parquet"
+        if cache_file.exists() and not refresh:
+            print(f"  {event}: cached")
+            df = pd.read_parquet(cache_file)
+            all_trades.extend(_df_to_trades(df))
+            continue
+
+        tickers = event_tickers[event]
+        print(f"  {event}: fetching {len(tickers)} markets...", end=" ", flush=True)
+        records = []
+        with httpx.Client(timeout=30.0) as client:
+            for ticker in tickers:
+                ticker_trades = _fetch_trades_for_ticker(client, ticker)
+                records.extend(ticker_trades)
+
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df.to_parquet(cache_file)
+        all_trades.extend(_df_to_trades(df))
+        print(f"{len(records)} trades")
+
+    all_trades.sort(key=lambda t: t.timestamp_ns)
+    return all_trades
+
+
+def _fetch_trades_for_ticker(client: httpx.Client, ticker: str) -> list[dict]:
+    """Fetch all trades for a ticker with cursor pagination."""
+    import time as _time
+
+    records = []
+    cursor = None
+    while True:
+        params = {"ticker": ticker, "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = client.get(f"{KALSHI_API_BASE}/markets/trades", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+        for trade in data.get("trades", []):
+            # Handle both legacy and current API formats
+            if "created_time" in trade:
+                ts_ns = _parse_iso_to_ns(trade["created_time"])
+            elif "ts" in trade:
+                ts_ns = int(trade["ts"]) * 1_000_000_000
+            else:
+                continue
+
+            # Price
+            if "yes_price_dollars" in trade:
+                price = float(trade["yes_price_dollars"])
+            elif "yes_price" in trade:
+                price = int(trade["yes_price"]) / 100.0
+            else:
+                continue
+
+            # Size
+            if "count_fp" in trade:
+                size = float(trade["count_fp"])
+            elif "count" in trade:
+                size = float(trade["count"])
+            else:
+                continue
+
+            # Aggressor side
+            taker = trade.get("taker_side", "")
+            if taker == "yes":
+                side = "BUYER"
+            elif taker == "no":
+                side = "SELLER"
+            else:
+                side = "NO_AGGRESSOR"
+
+            records.append({
+                "instrument_id": ticker,
+                "price": price,
+                "size": size,
+                "aggressor_side": side,
+                "timestamp_ns": ts_ns,
+            })
+
+        cursor = data.get("cursor")
+        if not cursor or not data.get("trades"):
+            break
+        _time.sleep(0.1)  # rate limit
+
+    return records
+
+
+def _df_to_trades(df: pd.DataFrame) -> list[TradeTick]:
+    """Convert DataFrame rows to TradeTick objects."""
+    if df.empty:
+        return []
+    side_map = {
+        "BUYER": AggressorSide.Buyer,
+        "SELLER": AggressorSide.Seller,
+        "NO_AGGRESSOR": AggressorSide.NoAggressor,
+    }
+    ids = df["instrument_id"].values
+    prices = df["price"].values
+    sizes = df["size"].values
+    sides = df["aggressor_side"].values
+    ts = df["timestamp_ns"].values
+    n = len(df)
+    result = [None] * n
+    for i in range(n):
+        result[i] = TradeTick(
+            instrument_id=str(ids[i]),
+            price=float(prices[i]),
+            size=float(sizes[i]),
+            aggressor_side=side_map[sides[i]],
+            timestamp_ns=int(ts[i]),
+        )
     return result
 
 
@@ -460,3 +658,269 @@ def _build_settlement_deltas(
 
     deltas.sort(key=lambda d: d.timestamp_ns)
     return deltas
+
+
+# ── Engine setup & evaluation ──
+
+
+def _load_cached_data() -> BacktestData:
+    """Load backtest data, using local parquet cache for fast subsequent runs.
+
+    The cache lives in .cache/ (gitignored, persists across branch changes).
+    First run fetches from MongoDB/API and writes parquet files.
+    Subsequent runs deserialize from parquet in ~2-3s instead of ~30s.
+    """
+    LOCAL_CACHE_DIR.mkdir(exist_ok=True)
+    marker = LOCAL_CACHE_DIR / "_ready"
+
+    if marker.exists():
+        print("Loading data from local cache...")
+        t0 = time.time()
+        data = _read_local_cache()
+        print(f"Data loaded in {time.time() - t0:.1f}s\n")
+        return data
+
+    print("Loading data (first run, building local cache)...")
+    t0 = time.time()
+    data = load(EVENT_TICKERS)
+    load_time = time.time() - t0
+    print(f"Data loaded in {load_time:.1f}s")
+
+    print("Saving local cache...")
+    _write_local_cache(data)
+    marker.touch()
+    print(f"Cache saved to {LOCAL_CACHE_DIR}\n")
+
+    return data
+
+
+def _write_local_cache(data: BacktestData) -> None:
+    """Serialize BacktestData to parquet files in .cache/."""
+    # Instruments
+    inst_records = [{
+        "id": i.id, "event_ticker": i.event_ticker,
+        "price_precision": i.price_precision, "size_precision": i.size_precision,
+        "expiration_ns": i.expiration_ns,
+    } for i in data.instruments]
+    pd.DataFrame(inst_records).to_parquet(LOCAL_CACHE_DIR / "instruments.parquet")
+
+    # Fair values
+    fv_records = [{
+        "timestamp_ns": f.timestamp_ns, "instrument_id": f.instrument_id,
+        "fv": f.fv, "theta": f.theta, "gamma_pos": f.gamma_pos,
+        "gamma_neg": f.gamma_neg, "new_review": f.new_review,
+        "hours_left": f.hours_left, "cur_score": f.cur_score,
+        "total_reviews": f.total_reviews,
+    } for f in data.fair_values]
+    pd.DataFrame(fv_records).to_parquet(LOCAL_CACHE_DIR / "fair_values.parquet")
+
+    # Orderbook deltas — use str() for PyO3 enums (not hashable for dict keys)
+    ob_records = [{
+        "instrument_id": d.instrument_id, "timestamp_ns": d.timestamp_ns,
+        "action": str(d.action).split(".")[-1].upper(), "side": "BUY" if int(d.side) == int(OrderSide.Buy) else "SELL",
+        "price": d.price, "size": d.size, "flags": d.flags,
+    } for d in data.orderbook_deltas]
+    pd.DataFrame(ob_records).to_parquet(LOCAL_CACHE_DIR / "orderbook_deltas.parquet")
+
+    # Trades
+    ob_records = [{
+        "instrument_id": t.instrument_id, "price": t.price, "size": t.size,
+        "aggressor_side": "NO_AGGRESSOR" if int(t.aggressor_side) == int(AggressorSide.NoAggressor) else ("BUYER" if int(t.aggressor_side) == int(AggressorSide.Buyer) else "SELLER"),
+        "timestamp_ns": t.timestamp_ns,
+    } for t in data.trades]
+    pd.DataFrame(ob_records).to_parquet(LOCAL_CACHE_DIR / "trades.parquet")
+
+
+def _read_local_cache() -> BacktestData:
+    """Deserialize BacktestData from parquet files in .cache/."""
+    instruments = _df_to_instruments(pd.read_parquet(LOCAL_CACHE_DIR / "instruments.parquet"))
+    fair_values = _df_to_fair_values(pd.read_parquet(LOCAL_CACHE_DIR / "fair_values.parquet"))
+    orderbook_deltas = _df_to_ob_deltas(pd.read_parquet(LOCAL_CACHE_DIR / "orderbook_deltas.parquet"))
+    trades = _df_to_trades(pd.read_parquet(LOCAL_CACHE_DIR / "trades.parquet"))
+    return BacktestData(
+        instruments=instruments, fair_values=fair_values,
+        orderbook_deltas=orderbook_deltas, trades=trades,
+    )
+
+
+def run_backtest(
+    strategy_factory: callable,
+    fee_rate: float = 0.07,
+) -> None:
+    """Load data, build engine, run strategy, print results.
+
+    Args:
+        strategy_factory: callable(instrument_id: str) -> Strategy instance.
+        fee_rate: taker fee rate (maker fee = 0 for KXRT markets).
+    """
+    from engine import BacktestEngine
+
+    total_t0 = time.time()
+
+    data = _load_cached_data()
+
+    # ── Build engine ──
+    engine = BacktestEngine(data.instruments, STARTING_BALANCE, fee_rate)
+    for inst in data.instruments:
+        engine.add_strategy(strategy_factory(inst.id))
+
+    # ── Run ──
+    print(f"Running backtest with {len(data.instruments)} instruments...")
+    t0 = time.time()
+    engine.run(data.fair_values, data.orderbook_deltas, data.trades)
+    run_time = time.time() - t0
+    print(f"Backtest completed in {run_time:.1f}s")
+
+    # ── Results ──
+    _print_results(engine)
+
+    total_time = time.time() - total_t0
+    print(f"\n{'=' * 70}")
+    print("STANDARDIZED OUTPUT")
+    print(f"{'=' * 70}")
+    starting = engine._core.starting_balance()
+    final = engine._core.balance()
+    pnl = final - starting
+    all_fills = engine._core.all_fills()
+    total_fees = sum(f.fee for f in all_fills)
+    positions = engine._core.all_positions()
+    wins = [p for p in positions if p.realized_pnl > 0]
+    losses = [p for p in positions if p.realized_pnl < 0]
+    print(f"---")
+    print(f"pnl:              {pnl:+.2f}")
+    print(f"return_pct:       {100*pnl/starting:+.2f}")
+    print(f"total_fees:       {total_fees:.2f}")
+    print(f"total_fills:      {len(all_fills)}")
+    print(f"win_rate:         {100*len(wins)/len(positions):.1f}" if positions else "win_rate:         0.0")
+    print(f"n_instruments:    {len(data.instruments)}")
+    print(f"run_seconds:      {run_time:.1f}")
+    print(f"total_seconds:    {total_time:.1f}")
+
+
+def _print_results(engine) -> None:
+    """Print comprehensive backtest statistics."""
+    from engine._engine import OrderSide, OrderStatus
+
+    starting = engine._core.starting_balance()
+    final = engine._core.balance()
+    pnl = final - starting
+
+    all_orders = engine._core.all_orders()
+    all_fills = engine._core.all_fills()
+    positions = engine._core.all_positions()
+
+    filled = [o for o in all_orders if o.status == OrderStatus.Filled]
+    canceled = [o for o in all_orders if o.status == OrderStatus.Canceled]
+    rejected = [o for o in all_orders if o.status == OrderStatus.Rejected]
+
+    buys = [o for o in filled if o.side == OrderSide.Buy]
+    sells = [o for o in filled if o.side == OrderSide.Sell]
+    maker_fills = [o for o in filled if o.is_maker is True]
+    taker_fills = [o for o in filled if o.is_maker is False]
+
+    fill_qtys = [o.filled_qty for o in filled]
+    fill_prices = [o.avg_fill_price for o in filled if o.avg_fill_price is not None]
+
+    print(f"\n{'=' * 70}")
+    print("ORDER STATISTICS")
+    print(f"{'=' * 70}")
+    print(f"Total orders:      {len(all_orders):,}")
+    if all_orders:
+        print(f"Filled:            {len(filled):,}  ({100*len(filled)/len(all_orders):.1f}%)")
+    print(f"Canceled:          {len(canceled):,}")
+    print(f"Rejected:          {len(rejected):,}")
+    print()
+    print(f"Buy fills:         {len(buys):,}  ({sum(o.filled_qty for o in buys):,.0f} contracts)")
+    print(f"Sell fills:        {len(sells):,}  ({sum(o.filled_qty for o in sells):,.0f} contracts)")
+    if filled:
+        print(f"Maker fills:       {len(maker_fills):,}  ({100*len(maker_fills)/len(filled):.1f}%)")
+        print(f"Taker fills:       {len(taker_fills):,}  ({100*len(taker_fills)/len(filled):.1f}%)")
+    print()
+    if fill_qtys:
+        print(f"Total fill qty:    {sum(fill_qtys):,.0f} contracts")
+        print(f"Avg fill qty:      {np.mean(fill_qtys):,.1f}")
+        print(f"Median fill qty:   {np.median(fill_qtys):,.1f}")
+        print(f"Max fill qty:      {max(fill_qtys):,.0f}")
+    if fill_prices:
+        print(f"Avg fill price:    {np.mean(fill_prices):.4f}")
+        print(f"Median fill price: {np.median(fill_prices):.4f}")
+
+    # Account
+    print(f"\n{'=' * 70}")
+    print("ACCOUNT & PNL")
+    print(f"{'=' * 70}")
+    print(f"Starting balance:  ${starting:,.2f}")
+    print(f"Final balance:     ${final:,.2f}")
+    print(f"Total PnL:         ${pnl:+,.2f}")
+    print(f"Return:            {100*pnl/starting:+.2f}%")
+
+    total_fees = sum(f.fee for f in all_fills)
+    print(f"Total fees:        ${total_fees:,.2f}")
+
+    if not positions:
+        print("\nNo positions generated.")
+        return
+
+    # Positions
+    wins = [p for p in positions if p.realized_pnl > 0]
+    losses = [p for p in positions if p.realized_pnl < 0]
+
+    print(f"\n{'=' * 70}")
+    print("POSITION STATISTICS")
+    print(f"{'=' * 70}")
+    print(f"Total positions:   {len(positions)}")
+    print(f"Winning:           {len(wins)}  (PnL: ${sum(p.realized_pnl for p in wins):+,.2f})")
+    print(f"Losing:            {len(losses)}  (PnL: ${sum(p.realized_pnl for p in losses):+,.2f})")
+    if positions:
+        print(f"Win rate:          {100*len(wins)/len(positions):.1f}%")
+    print()
+    if wins:
+        print(f"Avg win:           ${np.mean([p.realized_pnl for p in wins]):+,.2f}")
+        print(f"Largest win:       ${max(p.realized_pnl for p in wins):+,.2f}")
+    if losses:
+        print(f"Avg loss:          ${np.mean([p.realized_pnl for p in losses]):+,.2f}")
+        print(f"Largest loss:      ${min(p.realized_pnl for p in losses):+,.2f}")
+    if losses and sum(p.realized_pnl for p in losses) != 0:
+        print(f"Profit factor:     {sum(p.realized_pnl for p in wins) / abs(sum(p.realized_pnl for p in losses)):.2f}")
+
+    # Per-instrument
+    inst_stats = []
+    for p in positions:
+        inst_stats.append({
+            "instrument": p.instrument_id,
+            "entries": p.entry_count,
+            "pnl": p.realized_pnl,
+            "final_qty": p.signed_qty,
+        })
+    df = pd.DataFrame(inst_stats).sort_values("pnl", ascending=False)
+    print(f"\n{'=' * 70}")
+    print("PER-INSTRUMENT BREAKDOWN")
+    print(f"{'=' * 70}")
+    with pd.option_context("display.max_rows", 50, "display.width", 120, "display.float_format", "{:.2f}".format):
+        print(df.to_string(index=False))
+
+    # Per-event
+    print(f"\n{'=' * 70}")
+    print("PER-EVENT BREAKDOWN")
+    print(f"{'=' * 70}")
+    event_pnl: dict[str, list[float]] = {}
+    for p in positions:
+        event = "-".join(p.instrument_id.split("-")[:2])
+        event_pnl.setdefault(event, []).append(p.realized_pnl)
+    for event, pnls in sorted(event_pnl.items()):
+        print(f"  {event:12s}  {len(pnls):2d} instruments  PnL: ${sum(pnls):+,.2f}")
+
+    # Capital efficiency
+    total_bought = sum(o.avg_fill_price * o.filled_qty for o in buys if o.avg_fill_price)
+    total_sold = sum(o.avg_fill_price * o.filled_qty for o in sells if o.avg_fill_price)
+    turnover = total_bought + total_sold
+
+    print(f"\n{'=' * 70}")
+    print("CAPITAL EFFICIENCY")
+    print(f"{'=' * 70}")
+    print(f"Total bought:      ${total_bought:,.2f} notional")
+    print(f"Total sold:        ${total_sold:,.2f} notional")
+    print(f"Turnover:          ${turnover:,.2f}")
+    if turnover > 0:
+        print(f"PnL / Turnover:    {100*pnl/turnover:.2f}%")
+    print(f"PnL / Starting:    {100*pnl/starting:+.2f}%")

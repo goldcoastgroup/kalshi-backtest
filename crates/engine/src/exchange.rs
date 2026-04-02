@@ -143,16 +143,26 @@ impl EngineCore {
     }
 
     /// Compute the balance required to place an order.
-    /// For binary options:
-    ///   BUY:  cost = price * qty
-    ///   SELL: cost = (1 - price) * qty for the position-opening portion
-    ///         (position-reducing sells are free — you already own the contracts)
+    /// For binary options (fully collateralized):
+    ///   BUY  opening long:  cost = price * qty
+    ///   BUY  closing short: cost = 0 (margin release covers it)
+    ///   SELL closing long:  cost = 0 (you already own the contracts)
+    ///   SELL opening short: cost = (1 - price) * qty
     fn order_cost(&self, instrument_id: &str, side: &OrderSide, price: f64, quantity: f64) -> f64 {
+        let pos = self.account.get_position(instrument_id);
         match side {
-            OrderSide::Buy => price * quantity,
+            OrderSide::Buy => {
+                // Closing short portion is free (margin released on fill)
+                let reducing_qty = if pos.signed_qty < 0.0 {
+                    quantity.min(pos.signed_qty.abs())
+                } else {
+                    0.0
+                };
+                let opening_qty = quantity - reducing_qty;
+                price * opening_qty
+            }
             OrderSide::Sell => {
-                let pos = self.account.get_position(instrument_id);
-                // Only the portion that opens/increases a short costs capital
+                // Closing long portion is free (you already own the contracts)
                 let reducing_qty = if pos.signed_qty > 0.0 {
                     quantity.min(pos.signed_qty)
                 } else {
@@ -198,6 +208,22 @@ impl EngineCore {
             submit_timestamp_ns: timestamp_ns,
             fill_timestamp_ns: None,
         };
+
+        // Price validation: Kalshi allows 0.01 to 0.99 (binary option range)
+        if price < 0.01 - 1e-9 || price > 0.99 + 1e-9 {
+            let mut order = order;
+            order.status = OrderStatus::Rejected;
+            self.all_orders.push(order.clone());
+            return (order, None);
+        }
+
+        // Quantity validation: must be positive whole number
+        if quantity <= 0.0 || (quantity - quantity.round()).abs() > 1e-9 {
+            let mut order = order;
+            order.status = OrderStatus::Rejected;
+            self.all_orders.push(order.clone());
+            return (order, None);
+        }
 
         // reduce_only validation: reject if position doesn't allow reduction
         if reduce_only {
@@ -712,9 +738,25 @@ impl EngineCore {
         fills
     }
 
+    /// Modify quantity of a resting order.
+    ///
+    /// Kalshi queue semantics: decreasing quantity preserves queue position,
+    /// increasing quantity resets queue position to back of the line.
     pub fn modify_order(&mut self, order_id: &str, new_quantity: f64) -> bool {
         if let Some(order) = self.resting_orders.iter_mut().find(|o| o.id == order_id) {
+            let old_quantity = order.quantity;
             order.quantity = new_quantity;
+
+            // Increasing quantity → reset queue to back of line
+            if new_quantity > old_quantity {
+                if let Some(book) = self.books.get(&order.instrument_id) {
+                    let depth_ahead = book.depth_at(&order.side, order.price);
+                    let tick = crate::orderbook::price_to_tick(order.price);
+                    self.queue_ahead.insert(order_id.to_string(), (tick, depth_ahead));
+                }
+            }
+            // Decreasing quantity → queue position unchanged (no-op on queue_ahead)
+
             // Also update in all_orders
             if let Some(ao) = self.all_orders.iter_mut().find(|o| o.id == order_id) {
                 ao.quantity = new_quantity;
@@ -1456,5 +1498,67 @@ mod tests {
         let (o2, f2) = engine.submit_order("X", OrderSide::Buy, 0.50, 50.0, TimeInForce::IOC, false, 3000);
         assert_eq!(o2.status, OrderStatus::Filled);
         assert_eq!(f2.unwrap().quantity, 50.0);
+    }
+
+    #[test]
+    fn test_modify_order_decrease_preserves_queue() {
+        let inst = make_instrument("X");
+        let mut engine = EngineCore::new(vec![inst], 10_000.0, 0.07);
+        // Set up bid book with depth ahead
+        engine.apply_delta(&OrderBookDelta {
+            instrument_id: "X".to_string(), timestamp_ns: 0,
+            action: BookAction::Add, side: OrderSide::Buy, price: 0.40, size: 50.0, flags: 0,
+        });
+        engine.apply_delta(&OrderBookDelta {
+            instrument_id: "X".to_string(), timestamp_ns: 0,
+            action: BookAction::Add, side: OrderSide::Sell, price: 0.60, size: 100.0, flags: 0,
+        });
+
+        // Place resting buy at 0.40 — queue_ahead = 50 (behind existing depth)
+        let (order, _) = engine.submit_order("X", OrderSide::Buy, 0.40, 20.0, TimeInForce::GTC, false, 1000);
+        assert_eq!(order.status, OrderStatus::Resting);
+        let queue_before = engine.queue_ahead.get(&order.id).unwrap().1;
+        assert_eq!(queue_before, 50.0);
+
+        // Modify DOWN from 20 to 5 — queue position should NOT change
+        engine.modify_order(&order.id, 5.0);
+        let queue_after = engine.queue_ahead.get(&order.id).unwrap().1;
+        assert_eq!(queue_after, 50.0); // preserved
+    }
+
+    #[test]
+    fn test_modify_order_increase_resets_queue() {
+        let inst = make_instrument("X");
+        let mut engine = EngineCore::new(vec![inst], 10_000.0, 0.07);
+        // Set up bid book with depth ahead
+        engine.apply_delta(&OrderBookDelta {
+            instrument_id: "X".to_string(), timestamp_ns: 0,
+            action: BookAction::Add, side: OrderSide::Buy, price: 0.40, size: 50.0, flags: 0,
+        });
+        engine.apply_delta(&OrderBookDelta {
+            instrument_id: "X".to_string(), timestamp_ns: 0,
+            action: BookAction::Add, side: OrderSide::Sell, price: 0.60, size: 100.0, flags: 0,
+        });
+
+        // Place resting buy at 0.40 — queue_ahead = 50
+        let (order, _) = engine.submit_order("X", OrderSide::Buy, 0.40, 10.0, TimeInForce::GTC, false, 1000);
+        assert_eq!(order.status, OrderStatus::Resting);
+        assert_eq!(engine.queue_ahead.get(&order.id).unwrap().1, 50.0);
+
+        // Simulate some trades to reduce queue from 50 to 20
+        let trade = TradeTick {
+            instrument_id: "X".to_string(), price: 0.40, size: 30.0,
+            aggressor_side: AggressorSide::Seller, timestamp_ns: 2000,
+        };
+        engine.process_trade_tick(&trade);
+        let queue_worked = engine.queue_ahead.get(&order.id).unwrap().1;
+        assert!((queue_worked - 20.0).abs() < 1e-9); // 50 - 30 = 20
+
+        // Modify UP from 10 to 25 — queue resets to current book depth at 0.40
+        // Book depth at 0.40 should be 50 (original) since book deltas don't decrease from trades
+        engine.modify_order(&order.id, 25.0);
+        let queue_reset = engine.queue_ahead.get(&order.id).unwrap().1;
+        // Queue should be reset to current book depth (back of line), NOT 20
+        assert!(queue_reset > queue_worked);
     }
 }

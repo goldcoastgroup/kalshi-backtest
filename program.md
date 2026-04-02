@@ -61,10 +61,11 @@ LOOP FOREVER:
 1. Check git status (current branch, clean working tree)
 2. Edit train.py with your next idea
 3. git add train.py && git commit -m "experiment: <short description>"
-4. Run: uv run train.py > run.log 2>&1
+4. Run: timeout 300 uv run python train.py > run.log 2>&1
 5. Extract: grep "^pnl:" run.log
-6. If empty (crash):
+6. If empty (crash or timeout):
    - tail -n 50 run.log
+   - If timeout (exit code 124): strategy is too slow, simplify and re-run
    - If trivial fix (typo, import): fix, commit, re-run
    - If fundamental: log as crash, git reset, move on
 7. Record in results.tsv:
@@ -75,11 +76,14 @@ LOOP FOREVER:
 9. If pnl SAME or WORSE:
    - Status: discard
    - git reset --hard <previous best commit>
-10. If run exceeds 10 minutes: kill -9 the process, treat as crash
-11. GOTO 1
+10. GOTO 1
 ```
 
-**NEVER STOP.** Loop indefinitely until the user interrupts.
+### Critical rules
+
+- **NEVER STOP.** Loop indefinitely until the user interrupts. There is always another idea to try. Do not pause to ask questions, summarize, or wait for approval. Just keep running experiments.
+- **Every run has a 5-minute hard cap.** Use `timeout 300` on every run. If a strategy exceeds 5 minutes, it is too slow — treat it as a crash, discard, and design a faster approach.
+- **Do not deliberate between experiments.** Commit, run, record, move on. Thinking time is wasted time — you learn more from running an experiment than from theorizing about it.
 
 ## 5. Available Data
 

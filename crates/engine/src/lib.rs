@@ -13,11 +13,14 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::BookAction>()?;
     m.add_class::<types::OrderSide>()?;
     m.add_class::<types::OrderStatus>()?;
+    m.add_class::<types::AggressorSide>()?;
+    m.add_class::<types::TimeInForce>()?;
 
     // Data structs
     m.add_class::<types::Instrument>()?;
     m.add_class::<types::FairValueData>()?;
     m.add_class::<types::OrderBookDelta>()?;
+    m.add_class::<types::TradeTick>()?;
     m.add_class::<types::Order>()?;
     m.add_class::<types::Fill>()?;
     m.add_class::<types::Position>()?;

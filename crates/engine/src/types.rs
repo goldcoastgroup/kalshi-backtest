@@ -23,6 +23,14 @@ pub enum OrderSide {
 }
 
 #[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AggressorSide {
+    Buyer = 0,
+    Seller = 1,
+    NoAggressor = 2,
+}
+
+#[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OrderStatus {
     Submitted = 0,
@@ -30,6 +38,15 @@ pub enum OrderStatus {
     Filled = 2,
     Canceled = 3,
     Rejected = 4,
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TimeInForce {
+    FOK = 0,
+    IOC = 1,
+    GTC = 2,
+    POST_ONLY = 3,
 }
 
 // ── Instrument ───────────────────────────────────────────────────────
@@ -179,6 +196,43 @@ impl OrderBookDelta {
     }
 }
 
+// ── TradeTick ───────────────────────────────────────────────────────
+
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct TradeTick {
+    #[pyo3(get)]
+    pub instrument_id: String,
+    #[pyo3(get)]
+    pub price: f64,
+    #[pyo3(get)]
+    pub size: f64,
+    #[pyo3(get)]
+    pub aggressor_side: AggressorSide,
+    #[pyo3(get)]
+    pub timestamp_ns: i64,
+}
+
+#[pymethods]
+impl TradeTick {
+    #[new]
+    pub fn new(
+        instrument_id: String,
+        price: f64,
+        size: f64,
+        aggressor_side: AggressorSide,
+        timestamp_ns: i64,
+    ) -> Self {
+        Self {
+            instrument_id,
+            price,
+            size,
+            aggressor_side,
+            timestamp_ns,
+        }
+    }
+}
+
 // ── Order ────────────────────────────────────────────────────────────
 
 #[pyclass]
@@ -197,7 +251,9 @@ pub struct Order {
     #[pyo3(get)]
     pub filled_qty: f64,
     #[pyo3(get)]
-    pub post_only: bool,
+    pub time_in_force: TimeInForce,
+    #[pyo3(get)]
+    pub reduce_only: bool,
     #[pyo3(get)]
     pub status: OrderStatus,
     #[pyo3(get)]
@@ -214,8 +270,8 @@ pub struct Order {
 impl Order {
     fn __repr__(&self) -> String {
         format!(
-            "Order(id='{}', inst='{}', side={:?}, px={}, qty={}, filled={}, status={:?})",
-            self.id, self.instrument_id, self.side, self.price, self.quantity, self.filled_qty, self.status
+            "Order(id='{}', inst='{}', side={:?}, px={}, qty={}, filled={}, tif={:?}, status={:?})",
+            self.id, self.instrument_id, self.side, self.price, self.quantity, self.filled_qty, self.time_in_force, self.status
         )
     }
 

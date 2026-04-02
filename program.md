@@ -27,6 +27,11 @@
 - **Quantities must be positive whole numbers** — the engine enforces this.
 - **Do not modify the engine or prepare.py** — these define the exchange simulation and are frozen.
 - **Fee model is fixed**: taker fee = `ceil(0.07 * qty * price * (1-price) * 100) / 100`, maker fee = 0.
+- **No hindsight bias.** Every strategy decision must be based on information available *before* the backtest runs — never on the results of a previous run. This is the most important constraint. Concretely:
+  - **Never hardcode instrument-specific behavior.** You cannot say "skip KXRT-BRI-55 because it lost money." You *can* say "reduce size when `hours_left < 12` because late-stage markets are harder to exit" — that is a universal rule the strategy discovers from attributes it observes at decision time.
+  - **Filter by attributes, not by identity.** If certain instruments lose money, ask *why* — is it low liquidity? FV near 0.5? High gamma? Then encode that attribute-based rule in the strategy so it generalizes to unseen instruments.
+  - **The strategy must be the same function for every instrument.** The strategy class is instantiated once per instrument with identical logic. Differences in behavior should come from the data the strategy observes at runtime (FV, book state, greeks, `hours_left`, `cur_score`, `total_reviews`), not from the instrument's ticker string.
+  - **Test your reasoning:** before committing a change, ask "would this rule make sense on a new movie I've never backtested?" If the answer is no, it's overfitting.
 
 ## 3. How Experiments Work
 
@@ -35,7 +40,7 @@ Each experiment edits `train.py`, runs it, and evaluates the result.
 - `train.py` defines a Strategy subclass and config constants.
 - The strategy receives callbacks: `on_data(FairValueData)`, `on_book_update(instrument_id, timestamp_ns)`, `on_fill(Fill)`.
 - The strategy can call: `submit_order()`, `cancel_order()`, `modify_order()`, `best_bid()`, `best_ask()`, `get_position()`, `get_balance()`, `get_free_balance()`.
-- At the bottom, `train.py` calls `prepare.run_backtest(strategy_factory, event_tickers, starting_balance)`.
+- At the bottom, `train.py` calls `prepare.run_backtest(strategy_factory=MyStrategy)`.
 - The standardized output block is printed at the end:
   ```
   ---

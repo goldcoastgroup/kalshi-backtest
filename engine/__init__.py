@@ -19,6 +19,7 @@ from engine._engine import (  # noqa: F401
     OrderSide,
     OrderStatus,
     Position,
+    TimeInForce,
     TradeTick,
 )
 from engine.strategy import Strategy

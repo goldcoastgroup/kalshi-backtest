@@ -9,6 +9,7 @@ from engine._engine import (
     Order,
     OrderSide,
     Position,
+    TimeInForce,
 )
 
 
@@ -31,7 +32,7 @@ class Strategy:
     def on_data(self, data: FairValueData) -> None:
         """Called when a FairValueData event arrives for this instrument."""
 
-    def on_book_update(self, instrument_id: str) -> None:
+    def on_book_update(self, instrument_id: str, timestamp_ns: int = 0) -> None:
         """Called after orderbook deltas are applied (on F_LAST)."""
 
     def on_fill(self, fill: Fill) -> None:
@@ -47,12 +48,15 @@ class Strategy:
         side: OrderSide,
         price: float,
         quantity: float,
-        post_only: bool = True,
+        time_in_force: TimeInForce | None = None,
+        reduce_only: bool = False,
         timestamp_ns: int = 0,
     ) -> tuple[Order, Fill | None]:
-        """Submit a limit order. Returns (Order, optional Fill if immediate)."""
+        """Submit an order. Returns (Order, optional Fill if immediate)."""
+        if time_in_force is None:
+            time_in_force = TimeInForce.GTC
         return self._core.submit_order(
-            self.instrument_id, side, price, quantity, post_only, timestamp_ns,
+            self.instrument_id, side, price, quantity, time_in_force, reduce_only, timestamp_ns,
         )
 
     def modify_order(self, order_id: str, new_quantity: float) -> bool:
@@ -78,3 +82,7 @@ class Strategy:
     def get_balance(self) -> float:
         """Get current available cash balance."""
         return self._core.balance()
+
+    def get_free_balance(self) -> float:
+        """Get free balance (cash minus capital locked by resting orders)."""
+        return self._core.free_balance()

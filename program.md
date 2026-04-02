@@ -84,6 +84,8 @@ LOOP FOREVER:
 - **NEVER STOP.** Loop indefinitely until the user interrupts. There is always another idea to try. Do not pause to ask questions, summarize, or wait for approval. Just keep running experiments.
 - **Every run has a 5-minute hard cap.** Use `timeout 300` on every run. If a strategy exceeds 5 minutes, it is too slow — treat it as a crash, discard, and design a faster approach.
 - **Do not deliberate between experiments.** Commit, run, record, move on. Thinking time is wasted time — you learn more from running an experiment than from theorizing about it.
+- **Simpler is better.** A small improvement with clean code beats a large improvement with fragile code. If PnL doesn't change but the code gets simpler, that is a huge win — record it as a keep. Strategies should be generalizable and clean.
+- **Prefer continuous functions over step functions.** Avoid hard thresholds and if/else regime gates that may overfit to specific backtest conditions. Smooth, continuous scaling functions generalize better to unseen data. When you find yourself writing `if x > 0.85:`, ask whether a sigmoid or power function could achieve the same effect without a cliff.
 
 ## 5. Available Data
 

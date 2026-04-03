@@ -13,6 +13,7 @@ dependencies = [
     "pymongo",
     "python-dotenv",
     "httpx",
+    "plotly",
 ]
 
 [tool.maturin]

@@ -494,15 +494,17 @@ def _write_html(
     if instruments:
         html_parts.append("<h2>Instrument Scorecard</h2>")
         html_parts.append("<table>")
-        html_parts.append("<tr><th>Instrument</th><th>Fills</th><th>PnL</th><th>Avg Edge</th><th>Fill Rate</th><th>Capital</th><th>PnL/$</th></tr>")
+        html_parts.append("<tr><th>Instrument</th><th>Fills</th><th>PnL</th><th>Avg Price</th><th>Avg Edge</th><th>Fill Rate</th><th>Capital</th><th>PnL/$</th></tr>")
         sorted_inst = sorted(instruments, key=lambda x: x["total_pnl"], reverse=True)
         for inst in sorted_inst:
             pnl_class = "positive" if inst["total_pnl"] >= 0 else "negative"
             pnl_d = f"{inst['pnl_per_dollar']:.4f}" if inst["pnl_per_dollar"] is not None else "N/A"
+            avg_p = f"{inst['avg_price']:.4f}" if inst["avg_price"] is not None else "N/A"
             html_parts.append(
                 f"<tr><td>{inst['instrument_id']}</td>"
                 f"<td>{inst['num_fills']}</td>"
                 f"<td class='{pnl_class}'>${inst['total_pnl']:+,.2f}</td>"
+                f"<td>{avg_p}</td>"
                 f"<td>{inst['avg_edge_at_fill']:.4f}</td>"
                 f"<td>{100*inst['fill_rate']:.1f}%</td>"
                 f"<td>${inst['capital_deployed']:,.2f}</td>"

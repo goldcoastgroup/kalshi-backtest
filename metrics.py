@@ -217,6 +217,7 @@ def compute_instrument_summary(
 
     fill_agg: dict[str, dict] = defaultdict(lambda: {
         "count": 0, "total_edge": 0.0, "total_qty": 0.0, "total_capital": 0.0,
+        "total_price_x_qty": 0.0,
     })
     for f in fills:
         iid = f["instrument_id"]
@@ -224,6 +225,7 @@ def compute_instrument_summary(
         fa["count"] += 1
         fa["total_edge"] += f["edge"] * f["fill_qty"]
         fa["total_qty"] += f["fill_qty"]
+        fa["total_price_x_qty"] += f["fill_price"] * f["fill_qty"]
         if f["side"] == "BUY":
             fa["total_capital"] += f["fill_price"] * f["fill_qty"]
         else:
@@ -248,6 +250,7 @@ def compute_instrument_summary(
         pa = pos_agg.get(iid, {"count": 0, "total_pnl": 0.0, "wins": 0})
 
         avg_edge = (fa["total_edge"] / fa["total_qty"]) if fa["total_qty"] > 0 else 0.0
+        avg_price = (fa["total_price_x_qty"] / fa["total_qty"]) if fa["total_qty"] > 0 else None
         fill_rate = fa["count"] / orders_per_inst[iid] if orders_per_inst.get(iid, 0) > 0 else 0.0
         capital = fa["total_capital"]
         pnl_per_dollar = pa["total_pnl"] / capital if capital > 0 else None
@@ -257,6 +260,7 @@ def compute_instrument_summary(
             "num_fills": fa["count"],
             "num_positions": pa["count"],
             "total_pnl": round(pa["total_pnl"], 4),
+            "avg_price": round(avg_price, 4) if avg_price is not None else None,
             "avg_edge_at_fill": round(avg_edge, 4),
             "fill_rate": round(fill_rate, 4),
             "capital_deployed": round(capital, 4),

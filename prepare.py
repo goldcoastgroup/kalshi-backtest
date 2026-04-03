@@ -781,12 +781,14 @@ def _read_local_cache(cache_dir: Path | None = None) -> BacktestData:
 def run_backtest(
     strategy_factory: callable,
     fee_rate: float = 0.07,
+    starting_balance: float | None = None,
 ) -> dict:
     """Load data, build engine, run strategy, print results.
 
     Args:
         strategy_factory: callable(instrument_id: str) -> Strategy instance.
         fee_rate: taker fee rate (maker fee = 0 for KXRT markets).
+        starting_balance: override starting balance (default: STARTING_BALANCE).
 
     Returns baseline metrics dict (invisible to train.py which ignores return value).
     """
@@ -796,8 +798,10 @@ def run_backtest(
 
     data = _load_cached_data()
 
+    balance = starting_balance if starting_balance is not None else STARTING_BALANCE
+
     # ── Build engine ──
-    engine = BacktestEngine(data.instruments, STARTING_BALANCE, fee_rate)
+    engine = BacktestEngine(data.instruments, balance, fee_rate)
     for inst in data.instruments:
         engine.add_strategy(strategy_factory(inst.id))
 
@@ -823,9 +827,59 @@ def run_backtest(
     positions = engine._core.all_positions()
     wins = [p for p in positions if p.realized_pnl > 0]
     losses = [p for p in positions if p.realized_pnl < 0]
+    # ── Max drawdown (realized equity curve) ──
+    from collections import defaultdict
+    from engine._engine import OrderSide as _OrdSide
+
+    sorted_fills = sorted(all_fills, key=lambda x: x.timestamp_ns)
+    inst_pos: dict[str, float] = {}
+    inst_entry: dict[str, float] = {}
+    cum_rpnl = 0.0
+    cum_fees = 0.0
+    peak_equity = starting
+    max_dd = 0.0
+
+    for f in sorted_fills:
+        iid = f.instrument_id
+        is_buy = f.side == _OrdSide.Buy
+        fqty = f.quantity
+        signed = fqty if is_buy else -fqty
+
+        pos = inst_pos.get(iid, 0.0)
+        avg = inst_entry.get(iid, 0.0)
+
+        if pos == 0.0:
+            inst_pos[iid] = signed
+            inst_entry[iid] = f.price
+        elif (pos > 0 and signed > 0) or (pos < 0 and signed < 0):
+            total = abs(pos) + fqty
+            inst_entry[iid] = (avg * abs(pos) + f.price * fqty) / total
+            inst_pos[iid] = pos + signed
+        else:
+            close_qty = min(fqty, abs(pos))
+            if pos > 0:
+                cum_rpnl += (f.price - avg) * close_qty
+            else:
+                cum_rpnl += (avg - f.price) * close_qty
+            remaining = fqty - close_qty
+            inst_pos[iid] = pos + signed
+            if remaining > 0 and abs(inst_pos[iid]) > 1e-9:
+                inst_entry[iid] = f.price
+
+        cum_fees += f.fee
+        equity = starting + cum_rpnl - cum_fees
+        if equity > peak_equity:
+            peak_equity = equity
+        dd = peak_equity - equity
+        if dd > max_dd:
+            max_dd = dd
+
+    max_dd_pct = 100.0 * max_dd / starting if starting > 0 else 0.0
+
     print(f"---")
     print(f"pnl:              {pnl:+.2f}")
     print(f"return_pct:       {100*pnl/starting:+.2f}")
+    print(f"max_dd_pct:       {max_dd_pct:.2f}")
     print(f"total_fees:       {total_fees:.2f}")
     print(f"total_fills:      {len(all_fills)}")
     print(f"win_rate:         {100*len(wins)/len(positions):.1f}" if positions else "win_rate:         0.0")
@@ -860,6 +914,7 @@ def run_backtest(
     return {
         "pnl": pnl,
         "return_pct": round(100 * pnl / starting, 2),
+        "max_dd_pct": round(max_dd_pct, 2),
         "total_fees": total_fees,
         "total_fills": len(all_fills),
         "win_rate": round(100 * actual_wr, 1),

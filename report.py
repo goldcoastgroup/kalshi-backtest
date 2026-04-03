@@ -192,8 +192,8 @@ def _write_markdown(
     lines.extend([
         "## Settlement vs Trade Exits",
         "",
-        f"- Settled at expiry: {s.get('settled_count', 0)} positions, PnL ${s.get('settled_pnl', 0):+,.2f}",
-        f"- Closed by trade: {s.get('traded_count', 0)} positions, PnL ${s.get('traded_pnl', 0):+,.2f}",
+        f"- Settled at expiry: PnL ${s.get('settled_pnl', 0):+,.2f}",
+        f"- Closed by trade: PnL ${s.get('traded_pnl', 0):+,.2f}",
         "",
     ])
 
@@ -399,14 +399,13 @@ def _write_html(
     # 8. Settlement vs trade exit PnL
     fig8 = go.Figure()
     s = summary
-    if s.get("settled_count", 0) > 0 or s.get("traded_count", 0) > 0:
+    settled = s.get("settled_pnl", 0)
+    traded = s.get("traded_pnl", 0)
+    if settled != 0 or traded != 0:
         fig8.add_trace(go.Bar(
             x=["Settled at Expiry", "Closed by Trade"],
-            y=[s.get("settled_pnl", 0), s.get("traded_pnl", 0)],
-            text=[
-                f"${s.get('settled_pnl', 0):+.2f} ({s.get('settled_count', 0)} pos)",
-                f"${s.get('traded_pnl', 0):+.2f} ({s.get('traded_count', 0)} pos)",
-            ],
+            y=[settled, traded],
+            text=[f"${settled:+.2f}", f"${traded:+.2f}"],
             textposition="outside",
             marker_color=["#FF9800", "#2196F3"],
         ))
@@ -451,6 +450,80 @@ def _write_html(
         legend={"title": "Instrument", "font": {"size": 10}},
     )
     charts.append(fig9)
+
+    # 10. Total exposure over time (sum of |position| across instruments)
+    # Uses raw fills (including settlement) so exposure drops to 0 at expiry.
+    fig10 = go.Figure()
+    all_fills_raw = engine._core.all_fills()
+    if all_fills_raw:
+        from collections import defaultdict
+        from datetime import datetime, timezone
+        from engine._engine import OrderSide
+
+        # Replay all fills chronologically, tracking per-instrument exposure
+        # as % of current balance for a stacked area chart.
+        sorted_fills = sorted(all_fills_raw, key=lambda x: x.timestamp_ns)
+        cur_pos: dict[str, float] = {}
+        cur_entry: dict[str, float] = {}
+        bal = starting_balance
+        all_instruments = sorted({f.instrument_id for f in all_fills_raw})
+        inst_times: dict[str, list] = {iid: [] for iid in all_instruments}
+        inst_pcts: dict[str, list] = {iid: [] for iid in all_instruments}
+
+        for f in sorted_fills:
+            iid = f.instrument_id
+            qty = f.quantity
+            is_buy = f.side == OrderSide.Buy
+            signed = qty if is_buy else -qty
+            pos = cur_pos.get(iid, 0.0)
+            avg_entry = cur_entry.get(iid, 0.0)
+
+            if pos == 0.0:
+                pos = signed
+                avg_entry = f.price
+            elif (pos > 0 and signed > 0) or (pos < 0 and signed < 0):
+                total = abs(pos) + qty
+                avg_entry = (avg_entry * abs(pos) + f.price * qty) / total
+                pos += signed
+            else:
+                close_qty = min(qty, abs(pos))
+                if pos > 0:
+                    bal += (f.price - avg_entry) * close_qty
+                else:
+                    bal += (avg_entry - f.price) * close_qty
+                pos += signed
+                if abs(pos) > 1e-9 and qty > close_qty:
+                    avg_entry = f.price
+
+            bal -= f.fee
+            cur_pos[iid] = pos
+            cur_entry[iid] = avg_entry
+
+            ts = datetime.fromtimestamp(f.timestamp_ns / 1_000_000_000, tz=timezone.utc)
+            for k in all_instruments:
+                p = cur_pos.get(k, 0.0)
+                e = cur_entry.get(k, 0.0)
+                if p > 0:
+                    pct = 100.0 * p * e / bal if bal > 0 else 0.0
+                elif p < 0:
+                    pct = 100.0 * abs(p) * (1.0 - e) / bal if bal > 0 else 0.0
+                else:
+                    pct = 0.0
+                inst_times[k].append(ts)
+                inst_pcts[k].append(pct)
+
+        for iid in all_instruments:
+            fig10.add_trace(go.Scatter(
+                x=inst_times[iid], y=inst_pcts[iid],
+                name=iid, mode="lines", line={"width": 0.5},
+                stackgroup="one",
+            ))
+    fig10.update_layout(
+        title="Capital Deployed (% of Current Balance)",
+        xaxis_title="Time (UTC)", yaxis_title="Exposure (%)",
+        template="plotly_white", height=500,
+    )
+    charts.append(fig10)
 
     # Build HTML
     html_parts = [

@@ -365,12 +365,56 @@ def compute_summary_stats(
         stats["expected_win_rate"] = round(100 * mean_expected_wr, 1)
         stats["win_rate_over_expected"] = round(100 * (actual_wr - mean_expected_wr), 1)
 
-        settled = [p for p in positions if p["exit_type"] == "settlement"]
-        traded = [p for p in positions if p["exit_type"] == "trade"]
-        stats["settled_count"] = len(settled)
-        stats["traded_count"] = len(traded)
-        stats["settled_pnl"] = round(sum(p["realized_pnl"] for p in settled), 2)
-        stats["traded_pnl"] = round(sum(p["realized_pnl"] for p in traded), 2)
+        # Settlement vs trade PnL — replay fills per instrument to split
+        # realized PnL by closing fill type. Each closing fill (reduces position)
+        # realizes PnL = (exit - avg_entry) * qty. Settlement fills have
+        # price <= 0.01 or >= 0.99; everything else is a trade exit.
+        settlement_pnl = 0.0
+        trade_pnl = 0.0
+        inst_fills = defaultdict(list)
+        for f in all_fills_raw:
+            inst_fills[f.instrument_id].append(f)
+
+        for iid, flist in inst_fills.items():
+            flist.sort(key=lambda x: x.timestamp_ns)
+            pos = 0.0  # signed: positive = long, negative = short
+            avg_entry = 0.0
+
+            for f in flist:
+                is_buy = f.side == OrderSide.Buy
+                qty = f.quantity
+                signed = qty if is_buy else -qty
+
+                if pos == 0.0:
+                    # Opening from flat
+                    pos = signed
+                    avg_entry = f.price
+                elif (pos > 0 and signed > 0) or (pos < 0 and signed < 0):
+                    # Adding to position — update avg entry
+                    total = abs(pos) + qty
+                    avg_entry = (avg_entry * abs(pos) + f.price * qty) / total
+                    pos += signed
+                else:
+                    # Closing (partially or fully)
+                    close_qty = min(qty, abs(pos))
+                    if pos > 0:
+                        pnl = (f.price - avg_entry) * close_qty
+                    else:
+                        pnl = (avg_entry - f.price) * close_qty
+
+                    if f.price <= 0.01 or f.price >= 0.99:
+                        settlement_pnl += pnl
+                    else:
+                        trade_pnl += pnl
+
+                    remaining = qty - close_qty
+                    pos += signed
+                    if remaining > 0 and abs(pos) > 1e-9:
+                        # Flipped — remaining qty opens new position
+                        avg_entry = f.price
+
+        stats["settled_pnl"] = round(settlement_pnl, 2)
+        stats["traded_pnl"] = round(trade_pnl, 2)
 
         if wins:
             stats["avg_win"] = round(statistics.mean(p["realized_pnl"] for p in wins), 2)

@@ -88,7 +88,8 @@ def compute_fill_details(
     """Compute per-fill detail for all non-settlement fills.
 
     Returns one dict per fill with keys: instrument_id, side, fill_price,
-    fill_qty, fv_at_fill, edge, hours_left, is_maker, time_to_fill_sec.
+    fill_qty, fv_at_fill, edge, hours_left, is_maker, time_to_fill_sec,
+    timestamp_ns.
     """
     from engine._engine import OrderSide
 
@@ -128,6 +129,7 @@ def compute_fill_details(
             "hours_left": round(hours_left, 2) if hours_left is not None else None,
             "is_maker": fill.is_maker,
             "time_to_fill_sec": time_to_fill_sec,
+            "timestamp_ns": fill.timestamp_ns,
         })
 
     return results

@@ -416,6 +416,42 @@ def _write_html(
     )
     charts.append(fig8)
 
+    # 9. Fills over time scatter (color by instrument, hover details)
+    fig9 = go.Figure()
+    if fills:
+        from datetime import datetime, timezone
+
+        # Group fills by instrument for color coding
+        fills_by_inst: dict[str, list[dict]] = {}
+        for f in fills:
+            fills_by_inst.setdefault(f["instrument_id"], []).append(f)
+
+        for iid in sorted(fills_by_inst.keys()):
+            inst_fills = fills_by_inst[iid]
+            timestamps = [
+                datetime.fromtimestamp(f["timestamp_ns"] / 1_000_000_000, tz=timezone.utc)
+                for f in inst_fills
+            ]
+            prices = [f["fill_price"] for f in inst_fills]
+            hover = [
+                f"{iid}<br>Price: {f['fill_price']:.2f}<br>Side: {f['side']}<br>"
+                f"Qty: {f['fill_qty']:.0f}<br>Edge: {f['edge']:.4f}<br>FV: {f['fv_at_fill']:.4f}"
+                for f in inst_fills
+            ]
+            fig9.add_trace(go.Scatter(
+                x=timestamps, y=prices, mode="markers",
+                name=iid,
+                marker={"size": 5, "opacity": 0.7},
+                hovertext=hover, hoverinfo="text",
+            ))
+    fig9.update_layout(
+        title="Fills Over Time by Price",
+        xaxis_title="Time (UTC)", yaxis_title="Fill Price",
+        template="plotly_white", height=500,
+        legend={"title": "Instrument", "font": {"size": 10}},
+    )
+    charts.append(fig9)
+
     # Build HTML
     html_parts = [
         "<html><head>",

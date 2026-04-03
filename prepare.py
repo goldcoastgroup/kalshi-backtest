@@ -55,6 +55,7 @@ from engine._engine import (  # noqa: E402
 
 CACHE_DIR = Path.home() / ".cache" / "kalshi-backtest"
 LOCAL_CACHE_DIR = Path(__file__).resolve().parent / ".cache"
+OOS_CACHE_DIR = Path(__file__).resolve().parent / ".cache-oos"
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 MODEL_NAME = "xgb_ff99dd2"
 
@@ -694,15 +695,47 @@ def _load_cached_data() -> BacktestData:
     return data
 
 
-def _write_local_cache(data: BacktestData) -> None:
-    """Serialize BacktestData to parquet files in .cache/."""
+def _load_oos_cached_data(event_tickers: list[str]) -> BacktestData:
+    """Load out-of-sample backtest data, using .cache-oos/ for caching.
+
+    Same pattern as _load_cached_data but parameterized by event tickers
+    and using a separate cache directory to avoid contaminating in-sample data.
+    """
+    OOS_CACHE_DIR.mkdir(exist_ok=True)
+    marker = OOS_CACHE_DIR / "_ready"
+
+    if marker.exists():
+        print("Loading OOS data from local cache...")
+        t0 = time.time()
+        data = _read_local_cache(OOS_CACHE_DIR)
+        print(f"OOS data loaded in {time.time() - t0:.1f}s\n")
+        return data
+
+    print(f"Loading OOS data for {event_tickers} (first run, building cache)...")
+    t0 = time.time()
+    data = load(event_tickers)
+    load_time = time.time() - t0
+    print(f"OOS data loaded in {load_time:.1f}s")
+
+    print("Saving OOS local cache...")
+    _write_local_cache(data, OOS_CACHE_DIR)
+    marker.touch()
+    print(f"OOS cache saved to {OOS_CACHE_DIR}\n")
+
+    return data
+
+
+def _write_local_cache(data: BacktestData, cache_dir: Path | None = None) -> None:
+    """Serialize BacktestData to parquet files."""
+    if cache_dir is None:
+        cache_dir = LOCAL_CACHE_DIR
     # Instruments
     inst_records = [{
         "id": i.id, "event_ticker": i.event_ticker,
         "price_precision": i.price_precision, "size_precision": i.size_precision,
         "expiration_ns": i.expiration_ns,
     } for i in data.instruments]
-    pd.DataFrame(inst_records).to_parquet(LOCAL_CACHE_DIR / "instruments.parquet")
+    pd.DataFrame(inst_records).to_parquet(cache_dir / "instruments.parquet")
 
     # Fair values
     fv_records = [{
@@ -712,7 +745,7 @@ def _write_local_cache(data: BacktestData) -> None:
         "hours_left": f.hours_left, "cur_score": f.cur_score,
         "total_reviews": f.total_reviews,
     } for f in data.fair_values]
-    pd.DataFrame(fv_records).to_parquet(LOCAL_CACHE_DIR / "fair_values.parquet")
+    pd.DataFrame(fv_records).to_parquet(cache_dir / "fair_values.parquet")
 
     # Orderbook deltas — use str() for PyO3 enums (not hashable for dict keys)
     ob_records = [{
@@ -720,7 +753,7 @@ def _write_local_cache(data: BacktestData) -> None:
         "action": str(d.action).split(".")[-1].upper(), "side": "BUY" if int(d.side) == int(OrderSide.Buy) else "SELL",
         "price": d.price, "size": d.size, "flags": d.flags,
     } for d in data.orderbook_deltas]
-    pd.DataFrame(ob_records).to_parquet(LOCAL_CACHE_DIR / "orderbook_deltas.parquet")
+    pd.DataFrame(ob_records).to_parquet(cache_dir / "orderbook_deltas.parquet")
 
     # Trades
     ob_records = [{
@@ -728,15 +761,17 @@ def _write_local_cache(data: BacktestData) -> None:
         "aggressor_side": "NO_AGGRESSOR" if int(t.aggressor_side) == int(AggressorSide.NoAggressor) else ("BUYER" if int(t.aggressor_side) == int(AggressorSide.Buyer) else "SELLER"),
         "timestamp_ns": t.timestamp_ns,
     } for t in data.trades]
-    pd.DataFrame(ob_records).to_parquet(LOCAL_CACHE_DIR / "trades.parquet")
+    pd.DataFrame(ob_records).to_parquet(cache_dir / "trades.parquet")
 
 
-def _read_local_cache() -> BacktestData:
-    """Deserialize BacktestData from parquet files in .cache/."""
-    instruments = _df_to_instruments(pd.read_parquet(LOCAL_CACHE_DIR / "instruments.parquet"))
-    fair_values = _df_to_fair_values(pd.read_parquet(LOCAL_CACHE_DIR / "fair_values.parquet"))
-    orderbook_deltas = _df_to_ob_deltas(pd.read_parquet(LOCAL_CACHE_DIR / "orderbook_deltas.parquet"))
-    trades = _df_to_trades(pd.read_parquet(LOCAL_CACHE_DIR / "trades.parquet"))
+def _read_local_cache(cache_dir: Path | None = None) -> BacktestData:
+    """Deserialize BacktestData from parquet files."""
+    if cache_dir is None:
+        cache_dir = LOCAL_CACHE_DIR
+    instruments = _df_to_instruments(pd.read_parquet(cache_dir / "instruments.parquet"))
+    fair_values = _df_to_fair_values(pd.read_parquet(cache_dir / "fair_values.parquet"))
+    orderbook_deltas = _df_to_ob_deltas(pd.read_parquet(cache_dir / "orderbook_deltas.parquet"))
+    trades = _df_to_trades(pd.read_parquet(cache_dir / "trades.parquet"))
     return BacktestData(
         instruments=instruments, fair_values=fair_values,
         orderbook_deltas=orderbook_deltas, trades=trades,
@@ -746,12 +781,14 @@ def _read_local_cache() -> BacktestData:
 def run_backtest(
     strategy_factory: callable,
     fee_rate: float = 0.07,
-) -> None:
+) -> dict:
     """Load data, build engine, run strategy, print results.
 
     Args:
         strategy_factory: callable(instrument_id: str) -> Strategy instance.
         fee_rate: taker fee rate (maker fee = 0 for KXRT markets).
+
+    Returns baseline metrics dict (invisible to train.py which ignores return value).
     """
     from engine import BacktestEngine
 
@@ -772,7 +809,7 @@ def run_backtest(
     print(f"Backtest completed in {run_time:.1f}s")
 
     # ── Results ──
-    _print_results(engine)
+    turnover = _print_results(engine)
 
     total_time = time.time() - total_t0
     print(f"\n{'=' * 70}")
@@ -796,8 +833,115 @@ def run_backtest(
     print(f"run_seconds:      {run_time:.1f}")
     print(f"total_seconds:    {total_time:.1f}")
 
+    # Return baseline metrics (train.py ignores this, but it's available)
+    positions = engine._core.all_positions()
+    wins = [p for p in positions if p.realized_pnl > 0]
+    actual_wr = len(wins) / len(positions) if positions else 0.0
 
-def _print_results(engine) -> None:
+    # Expected win rate: entry_price (buy) or 1-entry_price (sell)
+    # Build first-fill-side lookup once (O(fills) not O(positions*fills))
+    from engine._engine import OrderSide as _OS
+    first_fill_side: dict[str, int] = {}
+    for f in all_fills:
+        if f.instrument_id not in first_fill_side:
+            first_fill_side[f.instrument_id] = int(f.side)
+
+    expected_wrs = []
+    for p in positions:
+        side = first_fill_side.get(p.instrument_id)
+        if side is not None and side == int(_OS.Buy):
+            expected_wrs.append(p.avg_entry_price)
+        elif side is not None:
+            expected_wrs.append(1.0 - p.avg_entry_price)
+        else:
+            expected_wrs.append(0.5)
+    mean_expected_wr = sum(expected_wrs) / len(expected_wrs) if expected_wrs else 0.0
+
+    return {
+        "pnl": pnl,
+        "return_pct": round(100 * pnl / starting, 2),
+        "total_fees": total_fees,
+        "total_fills": len(all_fills),
+        "win_rate": round(100 * actual_wr, 1),
+        "expected_win_rate": round(100 * mean_expected_wr, 1),
+        "win_rate_over_expected": round(100 * (actual_wr - mean_expected_wr), 1),
+        "turnover": round(turnover, 2),
+        "n_instruments": len(data.instruments),
+    }
+
+
+def run_backtest_analysis(
+    strategy_factory: callable,
+    event_tickers: list[str] | None = None,
+    output_dir: str = "analyze",
+    fee_rate: float = 0.07,
+) -> dict:
+    """Run backtest and generate full tearsheet reports (HTML, markdown, JSON).
+
+    Args:
+        strategy_factory: callable(instrument_id: str) -> Strategy instance.
+        event_tickers: list of event tickers to backtest. None = in-sample (EVENT_TICKERS).
+        output_dir: directory for output files.
+        fee_rate: taker fee rate.
+
+    Returns baseline metrics dict.
+    """
+    import subprocess
+
+    from engine import BacktestEngine
+
+    import report
+
+    total_t0 = time.time()
+
+    # Determine in-sample vs OOS
+    is_oos = event_tickers is not None and set(event_tickers) != set(EVENT_TICKERS)
+
+    if is_oos:
+        data = _load_oos_cached_data(event_tickers)
+    else:
+        data = _load_cached_data()
+
+    # Build engine
+    engine = BacktestEngine(data.instruments, STARTING_BALANCE, fee_rate)
+    for inst in data.instruments:
+        engine.add_strategy(strategy_factory(inst.id))
+
+    # Run
+    print(f"Running analysis backtest with {len(data.instruments)} instruments...")
+    t0 = time.time()
+    engine.run(data.fair_values, data.orderbook_deltas, data.trades)
+    run_time = time.time() - t0
+    print(f"Backtest completed in {run_time:.1f}s")
+
+    # Get commit hash for filenames
+    try:
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            text=True,
+        ).strip()
+    except Exception:
+        commit_hash = "unknown"
+
+    prefix = f"oos-{commit_hash}" if is_oos else f"in-sample-{commit_hash}"
+
+    # Generate reports
+    summary = report.create_report(
+        engine=engine,
+        fair_values=data.fair_values,
+        output_dir=output_dir,
+        prefix=prefix,
+        starting_balance=STARTING_BALANCE,
+    )
+
+    total_time = time.time() - total_t0
+    print(f"Analysis completed in {total_time:.1f}s")
+
+    return summary
+
+
+def _print_results(engine) -> float:
     """Print comprehensive backtest statistics."""
     from engine._engine import OrderSide, OrderStatus
 
@@ -924,3 +1068,4 @@ def _print_results(engine) -> None:
     if turnover > 0:
         print(f"PnL / Turnover:    {100*pnl/turnover:.2f}%")
     print(f"PnL / Starting:    {100*pnl/starting:+.2f}%")
+    return turnover

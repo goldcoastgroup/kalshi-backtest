@@ -56,36 +56,53 @@ Each experiment edits `train.py`, runs it, and evaluates the result.
 
 ## 4. The Experiment Loop
 
+Each experiment edits `train.py`, runs it, and evaluates the result.
+
+- `train.py` defines a Strategy subclass and config constants.
+- The strategy receives callbacks: `on_data(FairValueData)`, `on_book_update(instrument_id, timestamp_ns)`, `on_fill(Fill)`.
+- The strategy can call: `submit_order()`, `cancel_order()`, `modify_order()`, `best_bid()`, `best_ask()`, `get_position()`, `get_balance()`, `get_free_balance()`.
+- At the bottom, `train.py` calls `prepare.run_backtest(strategy_factory=MyStrategy)`.
+
 ```
 LOOP FOREVER:
 1. Check git status (current branch, clean working tree)
 2. Edit train.py with your next idea
 3. git add train.py && git commit -m "experiment: <short description>"
-4. Run: timeout 300 uv run python train.py > run.log 2>&1
-5. Extract: grep "^pnl:" run.log
+4. Run the multi-balance trial:
+   timeout 600 uv run python -c "
+   import train, prepare
+   balances = [100, 1_000, 10_000, 50_000, 100_000]
+   for bal in balances:
+       result = prepare.run_backtest(strategy_factory=train.HybridFV, starting_balance=bal)
+       print(f'RESULT bal={bal} return_pct={result[\"return_pct\"]} max_dd_pct={result[\"max_dd_pct\"]}')
+   " > run.log 2>&1
+5. Extract results: grep "^RESULT" run.log
 6. If empty (crash or timeout):
    - tail -n 50 run.log
    - If timeout (exit code 124): strategy is too slow, simplify and re-run
    - If trivial fix (typo, import): fix, commit, re-run
    - If fundamental: log as crash, git reset, move on
-7. Record in results.tsv:
-   commit<TAB>pnl<TAB>return_pct<TAB>total_fees<TAB>total_fills<TAB>win_rate<TAB>status<TAB>description
-8. If pnl IMPROVED (higher than previous best):
-   - Status: keep
-   - This commit becomes the new baseline
-9. If pnl SAME or WORSE:
-   - Status: discard
-   - git reset --hard <previous best commit>
-10. GOTO 1
+7. For each balance, compute calmar = return_pct / max_dd_pct (if max_dd_pct is 0, calmar = return_pct).
+   Compute avg_calmar and min_calmar from the 5 calmar values.
+8. Compute avg_return from the 5 return_pct values.
+9. Record in results.tsv:
+   commit<TAB>bal_100<TAB>bal_1k<TAB>bal_10k<TAB>bal_50k<TAB>bal_100k<TAB>dd_100<TAB>dd_1k<TAB>dd_10k<TAB>dd_50k<TAB>dd_100k<TAB>avg_calmar<TAB>min_calmar<TAB>avg_return<TAB>status<TAB>description
+   (bal_* columns are return_pct, dd_* columns are max_dd_pct)
+10. **Keep/discard logic** — KEEP if either:
+    a. avg_calmar improved over the previous best, OR
+    b. avg_calmar is within 10% of the previous best AND avg_return improved
+    Otherwise DISCARD (git reset --hard <previous best commit>).
+11. GOTO 1
 ```
 
 ### Critical rules
 
 - **NEVER STOP.** Loop indefinitely until the user interrupts. There is always another idea to try. Do not pause to ask questions, summarize, or wait for approval. Just keep running experiments.
-- **Every run has a 5-minute hard cap.** Use `timeout 300` on every run. If a strategy exceeds 5 minutes, it is too slow — treat it as a crash, discard, and design a faster approach.
+- **Every trial has a 10-minute hard cap.** Use `timeout 600` on every run (5 backtests at up to 2 min each). If a strategy exceeds this, it is too slow — treat it as a crash, discard, and design a faster approach.
 - **Do not deliberate between experiments.** Commit, run, record, move on. Thinking time is wasted time — you learn more from running an experiment than from theorizing about it.
-- **Simpler is better.** A small improvement with clean code beats a large improvement with fragile code. If PnL doesn't change but the code gets simpler, that is a huge win — record it as a keep. Strategies should be generalizable and clean.
+- **SIMPLE IS BETTER.** This is the most important rule after "never stop." If Calmar stays the same but the code gets simpler, **KEEP IT** — that is a major win. If Calmar improves slightly but the code gets more complex, think hard about whether it's worth it. Fewer lines, fewer constants, fewer branches = better. A 5-line strategy that returns 40% beats a 50-line strategy that returns 45%. Complexity is debt. Pay it down relentlessly.
 - **Prefer continuous functions over step functions.** Avoid hard thresholds and if/else regime gates that may overfit to specific backtest conditions. Smooth, continuous scaling functions generalize better to unseen data. When you find yourself writing `if x > 0.85:`, ask whether a sigmoid or power function could achieve the same effect without a cliff.
+- **Watch for bankroll-dependent behavior.** If returns are great at $10K but terrible at $2K or $50K, your position sizing has hardcoded absolute values that don't scale. Use `self.get_balance()` to derive sizes dynamically. The goal is consistent percentage returns across all bankroll sizes.
 
 ## 5. Available Data
 
@@ -117,34 +134,36 @@ Kalshi queue semantics are modeled in the engine:
 - **Increase quantity** (`modify_order` with larger qty): resets queue position to back of line.
 - **Practical implication**: if you have a resting order to buy 10 and now want to buy 20, it is better to submit a *new* order for 10 more (preserving the original order's queue position) rather than modifying the existing order to 20 (which would lose queue priority). Conversely, if you want to reduce from 10 to 5, modify in place to keep your queue spot.
 
-## 6. Research Directions
+## 6. Research Direction: Batch-Edge Strategy
 
-### Strategy Archetypes to Explore
+### Core Thesis
 
-1. **Market Making (FV-based)**
-   - Quote bid/ask around fair value with a spread
-   - Use theta/gamma for dynamic spread adjustment
-   - Kelly criterion for position sizing
-   - Inventory management: widen spread when position grows
+Rotten Tomatoes publishes reviews in **batches** — clusters of reviews arriving within minutes of each other, separated by hours-long gaps. Our FV model instantly recalculates fair value when a batch arrives, but the Kalshi market is slow to react. The edge is in the **lag between our model update and the market's adjustment**.
 
-2. **Directional (FV vs Market)**
-   - When FV significantly differs from mid-market, take aggressive positions
-   - Scale size by confidence (FV distance from 0.5, review count, hours left)
-   - Short skew: only buy when FV > 0.5, only sell when FV < 0.5
+Prior analysis confirmed:
+- In both in-sample and OOS, the vast majority of PnL came from aggressive directional positions taken when FV diverged significantly from market price after review activity.
+- Nearly all profit was **settled PnL** (holding to expiration), not traded PnL.
 
-3. **Event-Driven (Review Reactions)**
-   - Use `new_review` flag and `gamma_pos`/`gamma_neg` to predict post-review moves
-   - Trade aggressively when a new review shifts FV but market hasn't adjusted
+### Key Idea: Build a "Batch Completion" Detector
 
-4. **Hybrid Approaches**
-   - Combine market making (passive) with directional signals (aggressive)
-   - Use book imbalance as short-term signal, FV as medium-term signal
+Using only data available at decision time (`on_data` callback fields), build a metric that identifies when a review batch has just finished. The raw signals available are:
+- `new_review` (True at first minute of an epoch triggered by a new review)
+- `total_reviews` (cumulative count — use this to track how many reviews arrived in a burst)
+- `hours_left`
+- `cur_score`
+- `gamma_pos` / `gamma_neg` (how sensitive FV is to next review)
+- `fv` (current fair value)
 
-### Parameter Tuning
-- Spread width, position limits, Kelly fraction
-- Cooldown periods, minimum size thresholds
-- Event ticker selection (which movies to trade)
-- Balance allocation
+A batch is a cluster of reviews arriving close together, followed by a quiet period. The detector should track both `new_review` events and `total_reviews` changes to identify when a burst of reviews has landed and the dust has settled. Once a batch completes, FV is likely accurate but the market may not have adjusted yet — that's where the edge is.
+
+Use this detector as a signal for when to aggressively trade the FV-vs-market divergence. Experiment with how to combine it with other signals (FV extremeness, divergence size, etc.) to maximize PnL.
+
+### Constraints
+
+- The strategy must still scale across bankroll sizes ($100 to $100k). Use `self.get_balance()` for dynamic sizing.
+- No hindsight bias — the batch detector must use only information available at decision time.
+- Keep it simple. A 5-line batch detector that works is better than a 50-line one that's marginally better.
+- **Goal: maximize PnL without reducing average Calmar ratio** below the current baseline.
 
 ### Key Considerations
 - Binary options: prices bounded [0.01, 0.99], settle at $0 or $1
